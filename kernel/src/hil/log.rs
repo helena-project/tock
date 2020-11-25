@@ -19,7 +19,7 @@ pub trait LogRead<'a> {
         &self,
         buffer: &'static mut [u8],
         length: usize,
-    ) -> Result<(), (ReturnCode, Option<&'static mut [u8]>)>;
+    ) -> Result<(), (ReturnCode, &'static mut [u8])>;
 
     /// Returns the entry ID at the start of the log. This is the ID of the oldest remaining entry.
     fn log_start(&self) -> Self::EntryID;
@@ -43,7 +43,7 @@ pub trait LogRead<'a> {
 pub trait LogReadClient {
     /// Returns a buffer containing data read and the length of the number of bytes read or an error
     /// code if the read failed.
-    fn read_done(&self, buffer: &'static mut [u8], length: usize, error: ReturnCode);
+    fn read_done(&self, buffer: &'static mut [u8], result: Result<usize, ReturnCode>);
 
     /// Returns whether the seek succeeded or failed.
     fn seek_done(&self, error: ReturnCode);
@@ -59,7 +59,7 @@ pub trait LogWrite<'a> {
         &self,
         buffer: &'static mut [u8],
         length: usize,
-    ) -> Result<(), (ReturnCode, Option<&'static mut [u8]>)>;
+    ) -> Result<(), (ReturnCode, &'static mut [u8])>;
 
     /// Sync log to storage, making all entries persistent (not including any entries that were
     /// previously overwritten). There is no guarantee that any changes to the log are persistent
@@ -74,15 +74,10 @@ pub trait LogWrite<'a> {
 
 /// Receive callbacks from `LogWrite`.
 pub trait LogWriteClient {
-    /// Returns the original buffer that contained the data to write, the number of bytes written,
-    /// and whether any old entries in the log were lost (due to a circular log being filled up).
-    fn append_done(
-        &self,
-        buffer: &'static mut [u8],
-        length: usize,
-        records_lost: bool,
-        error: ReturnCode,
-    );
+    /// Returns the original buffer that contained the data to write. If the append was successful,
+    /// then also returns the number of bytes written and whether any old entries in the log were
+    /// lost (due to a circular log being filled up). Otherwise, returns the error code.
+    fn append_done(&self, buffer: &'static mut [u8], result: Result<(usize, bool), ReturnCode>);
 
     /// Returns whether or not all pages were correctly synced, making all changes persistent.
     fn sync_done(&self, error: ReturnCode);

@@ -7,10 +7,10 @@
 //!
 //! Entries can be identified and seeked-to with their unique Entry IDs. Entry IDs maintain the
 //! ordering of the underlying entries, and an entry with a larger entry ID is newer and comes
-//! after an entry with a smaller ID. IDs can also be used to determing the physical position of
+//! after an entry with a smaller ID. IDs can also be used to determine the physical position of
 //! entries within the log's underlying storage volume - taking the ID modulo the size of the
 //! underlying storage volume yields the position of the entry's header relative to the start of
-//! the volume. Entries should not be created manually by clients, only retrieved through the
+//! the volume. Entry IDs should not be created manually by clients, only retrieved through the
 //! `log_start()`, `log_end()`, and `next_read_entry_id()` functions.
 //!
 //! Entry IDs are not explicitly stored in the log. Instead, each page of the log contains a header
@@ -23,14 +23,16 @@
 //! ID). Entries also have a header of their own, which contains the length of the entry.
 //!
 //! Logs support the following basic operations:
-//!     * Read:     Read back previously written entries in whole. Entries are read in their
-//!                 entirety (no partial reads) from oldest to newest.
-//!     * Seek:     Seek to different entries to begin reading from a different entry (can only
-//!                 seek to the start of entries).
-//!     * Append:   Append new data entries onto the end of a log. Can fail if the new entry is too
-//!                 large to fit within the log.
-//!     * Sync:     Sync a log to flash to ensure that all changes are persistent.
-//!     * Erase:    Erase a log in its entirety, clearing the underlying flash volume.
+//!
+//! * Read:     Read back previously written entries in whole. Entries are read in their entirety
+//!             (no partial reads) from oldest to newest.
+//! * Seek:     Seek to different entries to begin reading from a different entry (can only seek to
+//!             the start of entries).
+//! * Append:   Append new data entries onto the end of a log. Can fail if the new entry is too
+//!             large to fit within the log.
+//! * Sync:     Sync a log to flash to ensure that all changes are persistent.
+//! * Erase:    Erase a log in its entirety, clearing the underlying flash volume.
+//!
 //! See the documentation for each individual function for more detail on how they operate.
 //!
 //! Note that while logs persist across reboots, they will be erased upon flashing a new kernel.
@@ -38,35 +40,40 @@
 //! Usage
 //! -----
 //!
-//! ```
-//!     storage_volume!(VOLUME, 2);
-//!     static mut PAGEBUFFER: sam4l::flashcalw::Sam4lPage = sam4l::flashcalw::Sam4lPage::new();
+//! ```rust
+//! storage_volume!(VOLUME, 2);
+//! static mut PAGEBUFFER: sam4l::flashcalw::Sam4lPage = sam4l::flashcalw::Sam4lPage::new();
 //!
-//!     let dynamic_deferred_call_clients =
-//!         static_init!([DynamicDeferredCallClientState; 2], Default::default());
-//!     let dynamic_deferred_caller = static_init!(
-//!         DynamicDeferredCall,
-//!         DynamicDeferredCall::new(dynamic_deferred_call_clients)
-//!     );
+//! let dynamic_deferred_call_clients =
+//!     static_init!([DynamicDeferredCallClientState; 2], Default::default());
+//! let dynamic_deferred_caller = static_init!(
+//!     DynamicDeferredCall,
+//!     DynamicDeferredCall::new(dynamic_deferred_call_clients)
+//! );
 //!
-//!     let log = static_init!(
-//!         capsules::log::Log,
-//!         capsules::log::Log::new(
-//!             &VOLUME,
-//!             &mut sam4l::flashcalw::FLASH_CONTROLLER,
-//!             &mut PAGEBUFFER,
-//!             dynamic_deferred_caller,
-//!             true
-//!         )
-//!     );
-//!     kernel::hil::flash::HasClient::set_client(&sam4l::flashcalw::FLASH_CONTROLLER, log);
-//!     log.initialize_callback_handle(dynamic_deferred_caller.register(log).expect("no deferred call slot available for log storage"));
+//! let log = static_init!(
+//!     capsules::log::Log,
+//!     capsules::log::Log::new(
+//!         &VOLUME,
+//!         &mut sam4l::flashcalw::FLASH_CONTROLLER,
+//!         &mut PAGEBUFFER,
+//!         dynamic_deferred_caller,
+//!         true
+//!     )
+//! );
+//! kernel::hil::flash::HasClient::set_client(&sam4l::flashcalw::FLASH_CONTROLLER, log);
+//! log.initialize_callback_handle(
+//!     dynamic_deferred_caller
+//!         .register(log)
+//!         .expect("no deferred call slot available for log storage")
+//! );
 //!
-//!     log.set_read_client(log_storage_read_client);
-//!     log.set_append_client(log_storage_append_client);
+//! log.set_read_client(log_storage_read_client);
+//! log.set_append_client(log_storage_append_client);
 //! ```
 
 use core::cell::Cell;
+use core::cmp;
 use core::convert::TryFrom;
 use core::mem::size_of;
 use core::unreachable;
@@ -181,7 +188,10 @@ impl<'a, F: Flash + 'static> Log<'a, F> {
 
     /// Returns the page number of the page containing the entry with the given ID.
     fn page_number(&self, entry_id: EntryID) -> usize {
-        (self.volume.as_ptr() as usize + entry_id % self.volume.len()) / self.page_size
+        let offset_global = self.volume.as_ptr() as usize;
+        let offset_local = entry_id % self.volume.len();
+        let offset_total = offset_global + offset_local;
+        offset_total / self.page_size
     }
 
     /// Gets the buffer containing the byte at the given position in the log.
@@ -210,43 +220,52 @@ impl<'a, F: Flash + 'static> Log<'a, F> {
         &buffer[offset..offset + num_bytes]
     }
 
-    /// Resets a log back to an empty log. Returns whether or not the log was reset successfully.
+    /// Resets the log back to an empty state. Returns whether or not the log was reset successfully.
     fn reset(&self) -> bool {
-        self.oldest_entry_id.set(PAGE_HEADER_SIZE);
-        self.read_entry_id.set(PAGE_HEADER_SIZE);
-        self.append_entry_id.set(PAGE_HEADER_SIZE);
-        self.pagebuffer.take().map_or(false, move |pagebuffer| {
-            for e in pagebuffer.as_mut().iter_mut() {
-                *e = 0;
+        self.pagebuffer.map_or(false, |pagebuffer| {
+            // Reset internal entry IDs.
+            self.oldest_entry_id.set(PAGE_HEADER_SIZE);
+            self.read_entry_id.set(PAGE_HEADER_SIZE);
+            self.append_entry_id.set(PAGE_HEADER_SIZE);
+            // Clear internal page buffer.
+            for byte_pointer in pagebuffer.as_mut().iter_mut() {
+                *byte_pointer = 0;
             }
-            self.pagebuffer.replace(pagebuffer);
             true
         })
     }
 
-    /// Reconstructs a log from flash.
-    fn reconstruct(&self) {
-        // Read page headers, get IDs of oldest and newest pages.
-        let mut oldest_page_id: EntryID = core::usize::MAX;
-        let mut newest_page_id: EntryID = 0;
-        for header_pos in (0..self.volume.len()).step_by(self.page_size) {
-            let page_id = {
+    /// Returns the byte offset, from the beginning of the log, of the oldest and newest pages in
+    /// the log as a tuple with two elements. The first element is the offset of the oldest page
+    /// while the second is the offset of the newest page.
+    ///
+    /// If the log is linear, then the offset of the oldest page will always be zero. However, if
+    /// the log is circular, then this might not be the case.
+    fn get_log_page_bounds(&self) -> (EntryID, EntryID) {
+        let mut offset_of_oldest_page = usize::MAX;
+        let mut offset_of_newest_page = 0;
+        let number_of_pages = self.volume.len() / self.page_size;
+        for page_number in 0..number_of_pages {
+            let header_pos = page_number * self.page_size;
+            // Determine the page's offset from the beginning of the log.
+            let offset_of_current_page = {
                 const ID_SIZE: usize = size_of::<EntryID>();
                 let id_bytes = &self.volume[header_pos..header_pos + ID_SIZE];
                 let id_bytes = <[u8; ID_SIZE]>::try_from(id_bytes).unwrap();
                 usize::from_ne_bytes(id_bytes)
             };
-
-            // Validate page ID read from header.
-            if page_id % self.volume.len() == header_pos {
-                if page_id < oldest_page_id {
-                    oldest_page_id = page_id;
-                }
-                if page_id > newest_page_id {
-                    newest_page_id = page_id;
-                }
+            // Make sure that the offset is valid and update oldest and newest page offsets
+            if offset_of_current_page % self.volume.len() == header_pos {
+                offset_of_oldest_page = cmp::min(offset_of_oldest_page, offset_of_current_page);
+                offset_of_newest_page = cmp::min(offset_of_newest_page, offset_of_current_page);
             }
         }
+        (offset_of_oldest_page, offset_of_newest_page)
+    }
+
+    /// Reconstructs a log from flash.
+    fn reconstruct(&self) {
+        let (oldest_page_id, newest_page_id) = self.get_log_page_bounds();
 
         // Reconstruct log if at least one valid page was found (meaning oldest page ID was set to
         // something not usize::MAX).
@@ -311,24 +330,25 @@ impl<'a, F: Flash + 'static> Log<'a, F> {
     }
 
     /// Returns the ID of the next entry to read or an error if no entry could be retrieved.
+    ///
     /// ReturnCodes used:
-    ///     * FAIL: reached end of log, nothing to read.
-    ///     * ERESERVE: client or internal pagebuffer missing.
+    ///
+    /// * FAIL: reached end of log, nothing to read.
+    /// * ERESERVE: client or internal pagebuffer missing.
     fn get_next_entry(&self) -> Result<EntryID, ReturnCode> {
         self.pagebuffer
-            .take()
-            .map_or(Err(ReturnCode::ERESERVE), move |pagebuffer| {
+            .map_or(Err(ReturnCode::ERESERVE), |pagebuffer| {
                 let mut entry_id = self.read_entry_id.get();
-
-                // Skip page header if at start of page or skip padded bytes if at end of page.
-                if entry_id % self.page_size == 0 {
+                let page_offset = entry_id % self.page_size;
+                if page_offset == 0 {
+                    // At the start of a page; skip the page header.
                     entry_id += PAGE_HEADER_SIZE;
                 } else if self.get_byte(entry_id, pagebuffer) == PAD_BYTE {
-                    entry_id += self.page_size - entry_id % self.page_size + PAGE_HEADER_SIZE;
+                    // At the start of a page's padding; skip the padding and the next page header.
+                    let padding = self.page_size - page_offset;
+                    entry_id += padding + PAGE_HEADER_SIZE;
                 }
-
-                // Check if end of log was reached and return.
-                self.pagebuffer.replace(pagebuffer);
+                // Check to see if the end of the log as been reached.
                 if entry_id >= self.append_entry_id.get() {
                     Err(ReturnCode::FAIL)
                 } else {
@@ -338,72 +358,65 @@ impl<'a, F: Flash + 'static> Log<'a, F> {
     }
 
     /// Reads and returns the contents of an entry header with the given ID. Fails if the header
-    /// data is invalid.
+    /// data is invalid. Recall that the header stores the byte length of the entry.
+    ///
     /// ReturnCodes used:
-    ///     * FAIL: entry header invalid.
-    ///     * ERESERVE: client or internal pagebuffer missing.
+    ///
+    /// * `FAIL`: entry header invalid.
+    /// * `ERESERVE`: internal pagebuffer missing.
     fn read_entry_header(&self, entry_id: EntryID) -> Result<usize, ReturnCode> {
         self.pagebuffer
-            .take()
-            .map_or(Err(ReturnCode::ERESERVE), move |pagebuffer| {
-                // Get length.
-                const LENGTH_SIZE: usize = size_of::<usize>();
-                let length_bytes = self.get_bytes(entry_id, LENGTH_SIZE, pagebuffer);
-                let length_bytes = <[u8; LENGTH_SIZE]>::try_from(length_bytes).unwrap();
-                let length = usize::from_ne_bytes(length_bytes);
-
-                // Return length of next entry.
-                self.pagebuffer.replace(pagebuffer);
-                if length == 0 || length > self.page_size - PAGE_HEADER_SIZE - ENTRY_HEADER_SIZE {
+            .map_or(Err(ReturnCode::ERESERVE), |pagebuffer| {
+                let header_bytes = self.get_bytes(entry_id, ENTRY_HEADER_SIZE, pagebuffer);
+                let header_bytes = <[u8; ENTRY_HEADER_SIZE]>::try_from(header_bytes).unwrap();
+                let header = usize::from_ne_bytes(header_bytes);
+                let max_header = self.page_size - PAGE_HEADER_SIZE - ENTRY_HEADER_SIZE;
+                if header == 0 || header > max_header {
                     Err(ReturnCode::FAIL)
                 } else {
-                    Ok(length)
+                    Ok(header)
                 }
             })
     }
 
     /// Reads the next entry into a buffer. Returns the number of bytes read on success, or an
     /// error otherwise.
+    ///
     /// ReturnCodes used:
-    ///     * FAIL: reached end of log, nothing to read.
-    ///     * ERESERVE: internal pagebuffer missing, log is presumably broken.
-    ///     * ESIZE: buffer not large enough to contain entry being read.
+    ///
+    /// * `FAIL`: reached end of log, nothing to read.
+    /// * `ERESERVE`: internal pagebuffer missing, log is presumably broken.
+    /// * `ESIZE`: the entry to be read is larger than the client's max read length.
     fn read_entry(&self, buffer: &mut [u8], length: usize) -> Result<usize, ReturnCode> {
         // Get next entry to read. Immediately returns FAIL in event of failure.
         let entry_id = self.get_next_entry()?;
         let entry_length = self.read_entry_header(entry_id)?;
+        if entry_length > length {
+            // The entry is larger than the client's max read length.
+            return Err(ReturnCode::ESIZE);
+        }
 
         // Read entry into buffer.
         self.pagebuffer
-            .take()
-            .map_or(Err(ReturnCode::ERESERVE), move |pagebuffer| {
-                // Ensure buffer is large enough to hold log entry.
-                if entry_length > length {
-                    self.pagebuffer.replace(pagebuffer);
-                    return Err(ReturnCode::ESIZE);
-                }
-                let entry_id = entry_id + ENTRY_HEADER_SIZE;
+            .map_or(Err(ReturnCode::ERESERVE), |pagebuffer| {
+                let entry_data_start = entry_id + ENTRY_HEADER_SIZE;
 
                 // Copy data into client buffer.
-                let data = self.get_bytes(entry_id, entry_length, pagebuffer);
+                let data = self.get_bytes(entry_data_start, entry_length, pagebuffer);
                 for i in 0..entry_length {
                     buffer[i] = data[i];
                 }
 
                 // Update read entry ID and return number of bytes read.
-                self.read_entry_id.set(entry_id + entry_length);
-                self.pagebuffer.replace(pagebuffer);
+                self.read_entry_id.set(entry_data_start + entry_length);
                 Ok(entry_length)
             })
     }
 
-    /// Writes an entry header at the given position within a page. Must write at most
-    /// ENTRY_HEADER_SIZE bytes.
-    fn write_entry_header(&self, length: usize, pos: usize, pagebuffer: &mut F::Page) {
-        let mut offset = 0;
-        for byte in &length.to_ne_bytes() {
-            pagebuffer.as_mut()[pos + offset] = *byte;
-            offset += 1;
+    /// Writes an entry header at the given position within a page.
+    fn write_entry_header(&self, header: usize, pos: usize, pagebuffer: &mut F::Page) {
+        for (offset, &byte) in header.to_ne_bytes().iter().enumerate() {
+            pagebuffer.as_mut()[pos + offset] = byte;
         }
     }
 
@@ -441,43 +454,43 @@ impl<'a, F: Flash + 'static> Log<'a, F> {
         self.client_callback();
     }
 
-    /// Flushes the pagebuffer to flash. Log state must be non-idle before calling, else data races
-    /// may occur due to asynchronous page write.
+    /// Flushes the pagebuffer to flash. The log must be set to a non-idle state to prevent other
+    /// operations from happening concurrently.
+    ///
     /// ReturnCodes used:
-    ///     * SUCCESS: flush started successfully.
-    ///     * FAIL: flash driver not configured.
-    ///     * EBUSY: flash driver busy.
+    ///
+    /// * SUCCESS: flush started successfully.
+    /// * FAIL: flash driver not configured.
+    /// * EBUSY: flash driver busy.
     fn flush_pagebuffer(&self, pagebuffer: &'static mut F::Page) -> ReturnCode {
-        // Pad end of page.
-        let mut pad_ptr = self.append_entry_id.get();
-        while pad_ptr % self.page_size != 0 {
-            pagebuffer.as_mut()[pad_ptr % self.page_size] = PAD_BYTE;
-            pad_ptr += 1;
+        // Pad the end of the page buffer.
+        let pad_start = self.append_entry_id.get() % self.page_size;
+        for i in pad_start..self.page_size {
+            pagebuffer.as_mut()[i] = PAD_BYTE;
         }
 
-        // Get flash page to write to and log page being overwritten. Subtract page_size since
-        // padding pointer points to start of the page following the one we want to flush after the
-        // padding operation.
-        let page_number = self.page_number(pad_ptr - self.page_size);
-        let overwritten_page = (pad_ptr - self.volume.len() - self.page_size) / self.page_size;
+        // Get flash page to write to and log page being overwritten.
+        let page_number = self.page_number(self.append_entry_id.get());
+        let overwritten_page = (self.append_entry_id.get() - self.volume.len()) / self.page_size;
 
-        // Advance read and oldest entry IDs, if within flash page being overwritten.
-        let read_entry_id = self.read_entry_id.get();
-        if read_entry_id / self.page_size == overwritten_page {
-            // Move read entry ID to start of next page.
-            self.read_entry_id.set(
-                read_entry_id + self.page_size + PAGE_HEADER_SIZE - read_entry_id % self.page_size,
-            );
+        // Advance the read entry ID if it resides in the overwritten page.
+        let read_entry_id_page = self.read_entry_id.get() / self.page_size;
+        if read_entry_id_page == overwritten_page {
+            // Move the read entry ID to the start of next page.
+            self.read_entry_id
+                .set((read_entry_id_page + 1) * self.page_size + PAGE_HEADER_SIZE);
         }
 
-        let oldest_entry_id = self.oldest_entry_id.get();
-        if oldest_entry_id / self.page_size == overwritten_page {
-            self.oldest_entry_id.set(oldest_entry_id + self.page_size);
+        // Advance the oldest entry ID if it resides in the overwritten page.
+        let oldest_entry_id_page = self.oldest_entry_id.get() / self.page_size;
+        if oldest_entry_id_page == overwritten_page {
+            self.oldest_entry_id
+                .set((oldest_entry_id_page + 1) + self.page_size);
         }
 
         // Sync page to flash.
         match self.driver.write_page(page_number, pagebuffer) {
-            Ok(()) => ReturnCode::SUCCESS,
+            Ok(_) => ReturnCode::SUCCESS,
             Err((return_code, pagebuffer)) => {
                 self.pagebuffer.replace(pagebuffer);
                 return_code
@@ -498,13 +511,15 @@ impl<'a, F: Flash + 'static> Log<'a, F> {
 
         // Increment append entry ID to point at start of next page.
         if append_entry_id % self.page_size != 0 {
-            append_entry_id += self.page_size - append_entry_id % self.page_size;
+            let page_offset = append_entry_id % self.page_size;
+            let remaining_bytes = self.page_size - page_offset;
+            append_entry_id += remaining_bytes;
         }
 
-        // Write page header to pagebuffer.
+        // Write page header to the pagebuffer.
         let id_bytes = append_entry_id.to_ne_bytes();
-        for index in 0..id_bytes.len() {
-            pagebuffer.as_mut()[index] = id_bytes[index];
+        for i in 0..id_bytes.len() {
+            pagebuffer.as_mut()[i] = id_bytes[i];
         }
 
         // Note: this is the only place where the append entry ID can cross page boundaries.
@@ -512,13 +527,14 @@ impl<'a, F: Flash + 'static> Log<'a, F> {
         true
     }
 
-    /// Erases a single page from storage.
+    /// Erases the oldest page from storage.
+    ///
+    /// When the flash driver is done with erasing the oldest page, it will call the `erase_complete`
+    /// callback which triggers the erasure of the next oldest page. Pages are erased from oldest to
+    /// newest so that the log will remain valid even if it fails to be erase completely.
     fn erase_page(&self) -> ReturnCode {
-        // Uses oldest entry ID to keep track of which page to erase. Thus, the oldest pages will be
-        // erased first and the log will remain in a valid state even if it fails to be erased
-        // completely.
-        self.driver
-            .erase_page(self.page_number(self.oldest_entry_id.get()))
+        let oldest_page = self.page_number(self.oldest_entry_id.get());
+        self.driver.erase_page(oldest_page)
     }
 
     /// Initializes a callback handle for deferred callbacks.
@@ -539,12 +555,15 @@ impl<'a, F: Flash + 'static> Log<'a, F> {
             State::Read | State::Seek => {
                 self.state.set(State::Idle);
                 self.read_client
-                    .map(move |read_client| match state {
+                    .map(|read_client| match state {
                         State::Read => self
                             .buffer
                             .take()
-                            .map(move |buffer| {
-                                read_client.read_done(buffer, self.length.get(), self.error.get());
+                            .map(|buffer| match self.error.get() {
+                                ReturnCode::SUCCESS => {
+                                    read_client.read_done(buffer, Ok(self.length.get()))
+                                }
+                                _ => read_client.read_done(buffer, Err(self.error.get())),
                             })
                             .unwrap(),
                         State::Seek => read_client.seek_done(self.error.get()),
@@ -555,17 +574,16 @@ impl<'a, F: Flash + 'static> Log<'a, F> {
             State::Append | State::Sync | State::Erase => {
                 self.state.set(State::Idle);
                 self.append_client
-                    .map(move |append_client| match state {
+                    .map(|append_client| match state {
                         State::Append => self
                             .buffer
                             .take()
-                            .map(move |buffer| {
-                                append_client.append_done(
+                            .map(|buffer| match self.error.get() {
+                                ReturnCode::SUCCESS => append_client.append_done(
                                     buffer,
-                                    self.length.get(),
-                                    self.records_lost.get(),
-                                    self.error.get(),
-                                );
+                                    Ok((self.length.get(), self.records_lost.get())),
+                                ),
+                                _ => append_client.append_done(buffer, Err(self.error.get())),
                             })
                             .unwrap(),
                         State::Sync => append_client.sync_done(self.error.get()),
@@ -589,38 +607,41 @@ impl<'a, F: Flash + 'static> LogRead<'a> for Log<'a, F> {
 
     /// Read an entire log entry into a buffer, if there are any remaining. Updates the read entry
     /// ID to point at the next entry when done.
+    ///
     /// Returns:
-    ///     * Ok(()) on success.
-    ///     * Err((ReturnCode, Option<buffer>)) on failure. The buffer will only be `None` if the
-    ///       error is due to a loss of the buffer.
+    /// * Ok(()) on success.
+    /// * Err((ReturnCode, Option<buffer>)) on failure. The buffer will only be `None` if the error
+    ///     is due to a loss of the buffer.
+    ///
     /// ReturnCodes used:
-    ///     * FAIL: reached end of log, nothing to read.
-    ///     * EBUSY: log busy with another operation, try again later.
-    ///     * EINVAL: provided client buffer is too small.
-    ///     * ECANCEL: invalid internal state, read entry ID was reset to start of log.
-    ///     * ERESERVE: client or internal pagebuffer missing.
-    ///     * ESIZE: buffer not large enough to contain entry being read.
+    /// * FAIL: reached end of log, nothing to read.
+    /// * EBUSY: log busy with another operation, try again later.
+    /// * EINVAL: provided client buffer is too small.
+    /// * ECANCEL: invalid internal state, read entry ID was reset to start of log.
+    /// * ERESERVE: client or internal pagebuffer missing.
+    /// * ESIZE: buffer not large enough to contain entry being read.
+    ///
     /// ReturnCodes used in read_done callback:
-    ///     * SUCCESS: read succeeded.
+    /// * SUCCESS: read succeeded.
     fn read(
         &self,
         buffer: &'static mut [u8],
         length: usize,
-    ) -> Result<(), (ReturnCode, Option<&'static mut [u8]>)> {
+    ) -> Result<(), (ReturnCode, &'static mut [u8])> {
         // Check for failure cases.
         if self.state.get() != State::Idle {
             // Log busy, try reading again later.
-            return Err((ReturnCode::EBUSY, Some(buffer)));
+            return Err((ReturnCode::EBUSY, buffer));
         } else if buffer.len() < length {
             // Client buffer too small for provided length.
-            return Err((ReturnCode::EINVAL, Some(buffer)));
+            return Err((ReturnCode::EINVAL, buffer));
         } else if self.read_entry_id.get() > self.append_entry_id.get() {
             // Read entry ID beyond append entry ID, must be invalid.
             self.read_entry_id.set(self.oldest_entry_id.get());
-            return Err((ReturnCode::ECANCEL, Some(buffer)));
+            return Err((ReturnCode::ECANCEL, buffer));
         } else if self.read_client.is_none() {
             // No client for callback.
-            return Err((ReturnCode::ERESERVE, Some(buffer)));
+            return Err((ReturnCode::ERESERVE, buffer));
         }
 
         // Try reading next entry.
@@ -633,7 +654,7 @@ impl<'a, F: Flash + 'static> LogRead<'a> for Log<'a, F> {
                 self.deferred_client_callback();
                 Ok(())
             }
-            Err(return_code) => Err((return_code, Some(buffer))),
+            Err(return_code) => Err((return_code, buffer)),
         }
     }
 
@@ -654,14 +675,18 @@ impl<'a, F: Flash + 'static> LogRead<'a> for Log<'a, F> {
 
     /// Seek to a new read entry ID. It is only legal to seek to entry IDs retrieved through the
     /// `log_start()`, `log_end()`, and `next_read_entry_id()` functions.
+    ///
     /// ReturnCodes used:
-    ///     * SUCCESS: seek succeeded.
-    ///     * EINVAL: entry ID not valid seek position within current log.
-    ///     * ERESERVE: no log client set.
+    /// * SUCCESS: seek succeeded.
+    /// * EBUSY: log busy with another operation, try again later.
+    /// * EBUSY: log busy with another operation, try again later.
+    /// * EINVAL: entry ID not valid seek position within current log.
+    /// * ERESERVE: no log client set.
     fn seek(&self, entry_id: Self::EntryID) -> ReturnCode {
-        if entry_id <= self.append_entry_id.get() && entry_id >= self.oldest_entry_id.get() {
+        if self.state.get() != State::Idle {
+            ReturnCode::EBUSY
+        } else if entry_id < self.append_entry_id.get() && entry_id >= self.oldest_entry_id.get() {
             self.read_entry_id.set(entry_id);
-
             self.state.set(State::Seek);
             self.error.set(ReturnCode::SUCCESS);
             self.deferred_client_callback();
@@ -685,40 +710,43 @@ impl<'a, F: Flash + 'static> LogWrite<'a> for Log<'a, F> {
 
     /// Appends an entry onto the end of the log. Entry must fit within a page (including log
     /// metadata).
+    ///
     /// Returns:
-    ///     * Ok(()) on success.
-    ///     * Err((ReturnCode, Option<buffer>)) on failure. The buffer will only be `None` if the
-    ///       error is due to a loss of the buffer.
+    /// * Ok(()) on success.
+    /// * Err((ReturnCode, Option<buffer>)) on failure. The buffer will only be `None` if the error
+    ///     error is due to a loss of the buffer.
+    ///
     /// ReturnCodes used:
-    ///     * FAIL: end of non-circular log reached, cannot append any more entries.
-    ///     * EBUSY: log busy with another operation, try again later.
-    ///     * EINVAL: provided client buffer is too small.
-    ///     * ERESERVE: client or internal pagebuffer missing.
-    ///     * ESIZE: entry too large to append to log.
+    /// * FAIL: end of non-circular log reached, cannot append any more entries.
+    /// * EBUSY: log busy with another operation, try again later.
+    /// * EINVAL: provided client buffer is too small.
+    /// * ERESERVE: client or internal pagebuffer missing.
+    /// * ESIZE: entry too large to append to log.
+    ///
     /// ReturnCodes used in append_done callback:
-    ///     * SUCCESS: append succeeded.
-    ///     * FAIL: write failed due to flash error.
-    ///     * ECANCEL: write failed due to reaching the end of a non-circular log.
+    /// * SUCCESS: append succeeded.
+    /// * FAIL: write failed due to flash error.
+    /// * ECANCEL: write failed due to reaching the end of a non-circular log.
     fn append(
         &self,
         buffer: &'static mut [u8],
         length: usize,
-    ) -> Result<(), (ReturnCode, Option<&'static mut [u8]>)> {
+    ) -> Result<(), (ReturnCode, &'static mut [u8])> {
         let entry_size = length + ENTRY_HEADER_SIZE;
 
         // Check for failure cases.
         if self.state.get() != State::Idle {
             // Log busy, try appending again later.
-            return Err((ReturnCode::EBUSY, Some(buffer)));
+            return Err((ReturnCode::EBUSY, buffer));
         } else if length == 0 || buffer.len() < length {
             // Invalid length provided.
-            return Err((ReturnCode::EINVAL, Some(buffer)));
+            return Err((ReturnCode::EINVAL, buffer));
         } else if entry_size + PAGE_HEADER_SIZE > self.page_size {
             // Entry too big, won't fit within a single page.
-            return Err((ReturnCode::ESIZE, Some(buffer)));
+            return Err((ReturnCode::ESIZE, buffer));
         } else if !self.circular && self.append_entry_id.get() + entry_size > self.volume.len() {
             // End of non-circular log has been reached.
-            return Err((ReturnCode::FAIL, Some(buffer)));
+            return Err((ReturnCode::FAIL, buffer));
         }
 
         // Perform append.
@@ -738,33 +766,35 @@ impl<'a, F: Flash + 'static> LogWrite<'a> for Log<'a, F> {
                     Ok(())
                 } else {
                     // Need to sync pagebuffer first, then append to new page.
+                    // FIXME: it doesn't look like the append is actually performed!
                     self.buffer.replace(buffer);
                     let return_code = self.flush_pagebuffer(pagebuffer);
                     if return_code == ReturnCode::SUCCESS {
                         Ok(())
                     } else {
                         self.state.set(State::Idle);
-                        self.buffer
-                            .take()
-                            .map_or(Err((return_code, None)), move |buffer| {
-                                Err((return_code, Some(buffer)))
-                            })
+                        match self.buffer.take() {
+                            Some(buffer) => Err((return_code, buffer)),
+                            None => unreachable!(),
+                        }
                     }
                 }
             }
-            None => Err((ReturnCode::ERESERVE, Some(buffer))),
+            None => Err((ReturnCode::ERESERVE, buffer)),
         }
     }
 
     /// Sync log to storage.
+    ///
     /// ReturnCodes used:
-    ///     * SUCCESS: flush started successfully.
-    ///     * FAIL: flash driver not configured.
-    ///     * EBUSY: log or flash driver busy, try again later.
-    ///     * ERESERVE: no log client set.
+    /// * SUCCESS: flush started successfully.
+    /// * FAIL: flash driver not configured.
+    /// * EBUSY: log or flash driver busy, try again later.
+    /// * ERESERVE: no log client set.
+    ///
     /// ReturnCodes used in sync_done callback:
-    ///     * SUCCESS: append succeeded.
-    ///     * FAIL: write failed due to flash error.
+    /// * SUCCESS: append succeeded.
+    /// * FAIL: write failed due to flash error.
     fn sync(&self) -> ReturnCode {
         if self.append_entry_id.get() % self.page_size == PAGE_HEADER_SIZE {
             // Pagebuffer empty, don't need to flush.
@@ -787,20 +817,24 @@ impl<'a, F: Flash + 'static> LogWrite<'a> for Log<'a, F> {
     }
 
     /// Erase the entire log.
+    ///
     /// ReturnCodes used:
-    ///     * SUCCESS: flush started successfully.
-    ///     * EBUSY: log busy, try again later.
-    /// ReturnCodes used in erase_done callback:
-    ///     * SUCCESS: erase succeeded.
-    ///     * EBUSY: erase interrupted by busy flash driver. Call erase again to resume.
+    ///
+    /// * SUCCESS: erase started successfully.
+    /// * EBUSY: log busy, try again later.
+    ///
+    /// ReturnCodes used in the erase_done callback:
+    ///
+    /// * SUCCESS: erase succeeded.
+    /// * EBUSY: erase interrupted by busy flash driver. Call erase again to resume.
     fn erase(&self) -> ReturnCode {
-        if self.state.get() != State::Idle {
-            // Log busy, try appending again later.
-            return ReturnCode::EBUSY;
+        match self.state.get() {
+            State::Idle => {
+                self.state.set(State::Erase);
+                self.erase_page()
+            }
+            _ => ReturnCode::EBUSY,
         }
-
-        self.state.set(State::Erase);
-        self.erase_page()
     }
 }
 
