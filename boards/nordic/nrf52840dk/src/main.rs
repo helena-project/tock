@@ -171,6 +171,7 @@ pub struct Platform {
     >,
     nonvolatile_storage: &'static capsules::nonvolatile_storage_driver::NonvolatileStorage<'static>,
     udp_driver: &'static capsules::net::udp::UDPDriver<'static>,
+    nfct: &'static capsules::nfc::NfcDriver<'static>,
 }
 
 impl kernel::Platform for Platform {
@@ -191,6 +192,7 @@ impl kernel::Platform for Platform {
             capsules::analog_comparator::DRIVER_NUM => f(Some(self.analog_comparator)),
             capsules::nonvolatile_storage_driver::DRIVER_NUM => f(Some(self.nonvolatile_storage)),
             capsules::net::udp::DRIVER_NUM => f(Some(self.udp_driver)),
+            capsules::nfc::DRIVER_NUM => f(Some(self.nfct)),
             kernel::ipc::DRIVER_NUM => f(Some(&self.ipc)),
             _ => f(None),
         }
@@ -360,6 +362,9 @@ pub unsafe fn reset_handler() {
         nrf52_components::BLEComponent::new(board_kernel, &base_peripherals.ble_radio, mux_alarm)
             .finalize(());
 
+    let nfc_driver =
+        components::nfc::NfcComponent::new(board_kernel, &base_peripherals.nfct).finalize(());
+
     let serial_num = nrf52840::ficr::FICR_INSTANCE.address();
     let serial_num_bottom_16 = serial_num[0] as u16 + ((serial_num[1] as u16) << 8);
     let src_mac_from_serial_num: MacAddress = MacAddress::Short(serial_num_bottom_16);
@@ -526,6 +531,7 @@ pub unsafe fn reset_handler() {
         nonvolatile_storage,
         udp_driver,
         ipc: kernel::ipc::IPC::new(board_kernel, &memory_allocation_capability),
+        nfct: nfc_driver,
     };
 
     platform.pconsole.start();

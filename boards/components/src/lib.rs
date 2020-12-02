@@ -25,6 +25,7 @@ pub mod lldb;
 pub mod lsm303dlhc;
 pub mod mlx90614;
 pub mod mx25r6435f;
+pub mod nfc;
 pub mod ninedof;
 pub mod nonvolatile_storage;
 pub mod nrf51822;
