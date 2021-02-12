@@ -32,7 +32,7 @@
 
 use core::cell::Cell;
 use kernel::common::cells::{OptionalCell, TakeCell};
-use kernel::hil::flash::{self, Flash};
+use kernel::hil::flash::{self, LegacyFlash};
 use kernel::hil::kv_system::{self, KVSystem};
 use kernel::ReturnCode;
 use tickv::{self, AsyncTicKV, ErrorCode};
@@ -47,13 +47,13 @@ enum Operation {
     GarbageCollect,
 }
 
-pub struct TickFSFlastCtrl<'a, F: Flash + 'static> {
+pub struct TickFSFlastCtrl<'a, F: LegacyFlash + 'static> {
     flash: &'a F,
     flash_read_buffer: TakeCell<'static, F::Page>,
     region_offset: usize,
 }
 
-impl<'a, F: Flash> TickFSFlastCtrl<'a, F> {
+impl<'a, F: LegacyFlash> TickFSFlastCtrl<'a, F> {
     pub fn new(
         flash: &'a F,
         flash_read_buffer: &'static mut F::Page,
@@ -67,7 +67,7 @@ impl<'a, F: Flash> TickFSFlastCtrl<'a, F> {
     }
 }
 
-impl<'a, F: Flash> tickv::flash_controller::FlashController<512> for TickFSFlastCtrl<'a, F> {
+impl<'a, F: LegacyFlash> tickv::flash_controller::FlashController<512> for TickFSFlastCtrl<'a, F> {
     fn read_region(
         &self,
         region_number: usize,
@@ -115,7 +115,7 @@ impl<'a, F: Flash> tickv::flash_controller::FlashController<512> for TickFSFlast
 
 pub type TicKVKeyType = [u8; 8];
 
-pub struct TicKVStore<'a, F: Flash + 'static> {
+pub struct TicKVStore<'a, F: LegacyFlash + 'static> {
     tickv: AsyncTicKV<'a, TickFSFlastCtrl<'a, F>, 512>,
     operation: Cell<Operation>,
     next_operation: Cell<Operation>,
@@ -127,7 +127,7 @@ pub struct TicKVStore<'a, F: Flash + 'static> {
     client: OptionalCell<&'a dyn kv_system::Client<TicKVKeyType>>,
 }
 
-impl<'a, F: Flash> TicKVStore<'a, F> {
+impl<'a, F: LegacyFlash> TicKVStore<'a, F> {
     pub fn new(
         flash: &'a F,
         tickfs_read_buf: &'static mut [u8; 512],
@@ -210,8 +210,8 @@ impl<'a, F: Flash> TicKVStore<'a, F> {
     }
 }
 
-impl<'a, F: Flash> flash::Client<F> for TicKVStore<'a, F> {
-    fn read_complete(&self, pagebuffer: &'static mut F::Page, _error: flash::Error) {
+impl<'a, F: LegacyFlash> flash::LegacyClient<F> for TicKVStore<'a, F> {
+    fn read_complete(&self, pagebuffer: &'static mut F::Page, _error: flash::LegacyError) {
         self.tickv.set_read_buffer(pagebuffer.as_mut());
         self.tickv
             .tickv
@@ -284,7 +284,7 @@ impl<'a, F: Flash> flash::Client<F> for TicKVStore<'a, F> {
         }
     }
 
-    fn write_complete(&self, pagebuffer: &'static mut F::Page, _error: flash::Error) {
+    fn write_complete(&self, pagebuffer: &'static mut F::Page, _error: flash::LegacyError) {
         self.tickv
             .tickv
             .controller
@@ -315,7 +315,7 @@ impl<'a, F: Flash> flash::Client<F> for TicKVStore<'a, F> {
         }
     }
 
-    fn erase_complete(&self, _error: flash::Error) {
+    fn erase_complete(&self, _error: flash::LegacyError) {
         let (ret, buf_buffer) = self.tickv.continue_operation();
 
         buf_buffer.map(|buf| {
@@ -345,7 +345,7 @@ impl<'a, F: Flash> flash::Client<F> for TicKVStore<'a, F> {
     }
 }
 
-impl<'a, F: Flash> KVSystem<'a> for TicKVStore<'a, F> {
+impl<'a, F: LegacyFlash> KVSystem<'a> for TicKVStore<'a, F> {
     type K = TicKVKeyType;
 
     fn set_client(&self, client: &'a dyn kv_system::Client<Self::K>) {

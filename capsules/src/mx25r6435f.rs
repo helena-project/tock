@@ -175,7 +175,7 @@ pub struct MX25R6435F<
     hold_pin: Option<&'a P>,
     txbuffer: TakeCell<'static, [u8]>,
     rxbuffer: TakeCell<'static, [u8]>,
-    client: OptionalCell<&'a dyn hil::flash::Client<MX25R6435F<'a, S, P, A>>>,
+    client: OptionalCell<&'a dyn hil::flash::LegacyClient<MX25R6435F<'a, S, P, A>>>,
     client_sector: TakeCell<'static, Mx25r6435fSector>,
 }
 
@@ -362,7 +362,10 @@ impl<
                             self.rxbuffer.replace(read_buffer);
 
                             self.client.map(move |client| {
-                                client.read_complete(sector, hil::flash::Error::CommandComplete);
+                                client.read_complete(
+                                    sector,
+                                    hil::flash::LegacyError::CommandComplete,
+                                );
                             });
                         } else {
                             let address =
@@ -435,7 +438,7 @@ impl<
                 self.state.set(State::Idle);
                 self.txbuffer.replace(write_buffer);
                 self.client.map(|client| {
-                    client.erase_complete(hil::flash::Error::CommandComplete);
+                    client.erase_complete(hil::flash::LegacyError::CommandComplete);
                 });
             }
             State::WriteSectorWriteEnable {
@@ -450,7 +453,7 @@ impl<
                     self.txbuffer.replace(write_buffer);
                     self.client.map(|client| {
                         self.client_sector.take().map(|sector| {
-                            client.write_complete(sector, hil::flash::Error::CommandComplete);
+                            client.write_complete(sector, hil::flash::LegacyError::CommandComplete);
                         });
                     });
                 } else {
@@ -554,7 +557,7 @@ impl<
         S: hil::spi::SpiMasterDevice + 'a,
         P: hil::gpio::Pin + 'a,
         A: hil::time::Alarm<'a> + 'a,
-        C: hil::flash::Client<Self>,
+        C: hil::flash::LegacyClient<Self>,
     > hil::flash::HasClient<'a, C> for MX25R6435F<'a, S, P, A>
 {
     fn set_client(&self, client: &'a C) {
@@ -567,7 +570,7 @@ impl<
         S: hil::spi::SpiMasterDevice + 'a,
         P: hil::gpio::Pin + 'a,
         A: hil::time::Alarm<'a> + 'a,
-    > hil::flash::Flash for MX25R6435F<'a, S, P, A>
+    > hil::flash::LegacyFlash for MX25R6435F<'a, S, P, A>
 {
     type Page = Mx25r6435fSector;
 

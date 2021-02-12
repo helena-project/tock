@@ -35,14 +35,16 @@ macro_rules! nv_storage_component_helper {
         use capsules::nonvolatile_to_pages::NonvolatileToPages;
         use core::mem::MaybeUninit;
         use kernel::hil;
-        static mut BUF1: MaybeUninit<<$F as hil::flash::Flash>::Page> = MaybeUninit::uninit();
+        static mut BUF1: MaybeUninit<<$F as hil::flash::LegacyFlash>::Page> = MaybeUninit::uninit();
         static mut BUF2: MaybeUninit<NonvolatileToPages<'static, $F>> = MaybeUninit::uninit();
         (&mut BUF1, &mut BUF2)
     };};
 }
 
 pub struct NonvolatileStorageComponent<
-    F: 'static + hil::flash::Flash + hil::flash::HasClient<'static, NonvolatileToPages<'static, F>>,
+    F: 'static
+        + hil::flash::LegacyFlash
+        + hil::flash::HasClient<'static, NonvolatileToPages<'static, F>>,
 > {
     board_kernel: &'static kernel::Kernel,
     flash: &'static F,
@@ -54,7 +56,7 @@ pub struct NonvolatileStorageComponent<
 
 impl<
         F: 'static
-            + hil::flash::Flash
+            + hil::flash::LegacyFlash
             + hil::flash::HasClient<'static, NonvolatileToPages<'static, F>>,
     > NonvolatileStorageComponent<F>
 {
@@ -79,12 +81,12 @@ impl<
 
 impl<
         F: 'static
-            + hil::flash::Flash
+            + hil::flash::LegacyFlash
             + hil::flash::HasClient<'static, NonvolatileToPages<'static, F>>,
     > Component for NonvolatileStorageComponent<F>
 {
     type StaticInput = (
-        &'static mut MaybeUninit<<F as hil::flash::Flash>::Page>,
+        &'static mut MaybeUninit<<F as hil::flash::LegacyFlash>::Page>,
         &'static mut MaybeUninit<NonvolatileToPages<'static, F>>,
     );
     type Output = &'static NonvolatileStorage<'static>;
@@ -94,8 +96,8 @@ impl<
 
         let flash_pagebuffer = static_init_half!(
             static_buffer.0,
-            <F as hil::flash::Flash>::Page,
-            <F as hil::flash::Flash>::Page::default()
+            <F as hil::flash::LegacyFlash>::Page,
+            <F as hil::flash::LegacyFlash>::Page::default()
         );
 
         let nv_to_page = static_init_half!(

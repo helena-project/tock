@@ -194,7 +194,7 @@ pub enum FlashRegion {
 
 pub struct FlashCtrl<'a> {
     registers: StaticRef<FlashCtrlRegisters>,
-    flash_client: OptionalCell<&'a dyn hil::flash::Client<FlashCtrl<'a>>>,
+    flash_client: OptionalCell<&'a dyn hil::flash::LegacyClient<FlashCtrl<'a>>>,
     data_configured: Cell<bool>,
     info_configured: Cell<bool>,
     read_buf: TakeCell<'static, LowRiscPage>,
@@ -289,7 +289,7 @@ impl<'a> FlashCtrl<'a> {
             if let Some(buf) = read_buf {
                 // We were doing a read
                 self.flash_client.map(move |client| {
-                    client.read_complete(buf, hil::flash::Error::FlashError);
+                    client.read_complete(buf, hil::flash::LegacyError::FlashError);
                 });
             }
 
@@ -297,7 +297,7 @@ impl<'a> FlashCtrl<'a> {
             if let Some(buf) = write_buf {
                 // We were doing a write
                 self.flash_client.map(move |client| {
-                    client.write_complete(buf, hil::flash::Error::FlashError);
+                    client.write_complete(buf, hil::flash::LegacyError::FlashError);
                 });
             }
         }
@@ -349,7 +349,7 @@ impl<'a> FlashCtrl<'a> {
                     if self.read_index.get() >= buf.0.len() {
                         // We have all of the data, call the client
                         self.flash_client.map(move |client| {
-                            client.read_complete(buf, hil::flash::Error::CommandComplete);
+                            client.read_complete(buf, hil::flash::LegacyError::CommandComplete);
                         });
                     } else {
                         // Still waiting on data, keep waiting
@@ -364,7 +364,7 @@ impl<'a> FlashCtrl<'a> {
                     if self.write_index.get() >= buf.0.len() {
                         // We sent all of the data, call the client
                         self.flash_client.map(move |client| {
-                            client.write_complete(buf, hil::flash::Error::CommandComplete);
+                            client.write_complete(buf, hil::flash::LegacyError::CommandComplete);
                         });
                     } else {
                         // Still writing data, keep trying
@@ -379,20 +379,20 @@ impl<'a> FlashCtrl<'a> {
                     .modify(MP_BANK_CFG::ERASE_EN_0::CLEAR + MP_BANK_CFG::ERASE_EN_1::CLEAR);
 
                 self.flash_client.map(move |client| {
-                    client.erase_complete(hil::flash::Error::CommandComplete);
+                    client.erase_complete(hil::flash::LegacyError::CommandComplete);
                 });
             }
         }
     }
 }
 
-impl<C: hil::flash::Client<Self>> hil::flash::HasClient<'static, C> for FlashCtrl<'_> {
+impl<C: hil::flash::LegacyClient<Self>> hil::flash::HasClient<'static, C> for FlashCtrl<'_> {
     fn set_client(&self, client: &'static C) {
         self.flash_client.set(client);
     }
 }
 
-impl hil::flash::Flash for FlashCtrl<'_> {
+impl hil::flash::LegacyFlash for FlashCtrl<'_> {
     type Page = LowRiscPage;
 
     fn read_page(

@@ -74,7 +74,7 @@ use kernel::common::cells::{OptionalCell, TakeCell};
 use kernel::common::dynamic_deferred_call::{
     DeferredCallHandle, DynamicDeferredCall, DynamicDeferredCallClient,
 };
-use kernel::hil::flash::{self, Flash};
+use kernel::hil::flash::{self, LegacyFlash};
 use kernel::hil::log::{LogRead, LogReadClient, LogWrite, LogWriteClient};
 use kernel::ReturnCode;
 
@@ -100,12 +100,12 @@ enum State {
     Erase,
 }
 
-pub struct Log<'a, F: Flash + 'static> {
+pub struct Log<'a, F: LegacyFlash + 'static> {
     /// Underlying storage volume.
     volume: &'static [u8],
     /// Capacity of log in bytes.
     capacity: usize,
-    /// Flash interface.
+    /// LegacyFlash interface.
     driver: &'a F,
     /// Buffer for a flash page.
     pagebuffer: TakeCell<'static, F::Page>,
@@ -143,7 +143,7 @@ pub struct Log<'a, F: Flash + 'static> {
     error: Cell<ReturnCode>,
 }
 
-impl<'a, F: Flash + 'static> Log<'a, F> {
+impl<'a, F: LegacyFlash + 'static> Log<'a, F> {
     pub fn new(
         volume: &'static [u8],
         driver: &'a F,
@@ -579,7 +579,7 @@ impl<'a, F: Flash + 'static> Log<'a, F> {
     }
 }
 
-impl<'a, F: Flash + 'static> LogRead<'a> for Log<'a, F> {
+impl<'a, F: LegacyFlash + 'static> LogRead<'a> for Log<'a, F> {
     type EntryID = EntryID;
 
     /// Set the client for read operation callbacks.
@@ -677,7 +677,7 @@ impl<'a, F: Flash + 'static> LogRead<'a> for Log<'a, F> {
     }
 }
 
-impl<'a, F: Flash + 'static> LogWrite<'a> for Log<'a, F> {
+impl<'a, F: LegacyFlash + 'static> LogWrite<'a> for Log<'a, F> {
     /// Set the client for append operation callbacks.
     fn set_append_client(&self, append_client: &'a dyn LogWriteClient) {
         self.append_client.set(append_client);
@@ -804,17 +804,17 @@ impl<'a, F: Flash + 'static> LogWrite<'a> for Log<'a, F> {
     }
 }
 
-impl<'a, F: Flash + 'static> flash::Client<F> for Log<'a, F> {
-    fn read_complete(&self, _read_buffer: &'static mut F::Page, _error: flash::Error) {
+impl<'a, F: LegacyFlash + 'static> flash::LegacyClient<F> for Log<'a, F> {
+    fn read_complete(&self, _read_buffer: &'static mut F::Page, _error: flash::LegacyError) {
         // Reads are made directly from the storage volume, not through the flash interface.
         unreachable!();
     }
 
     /// If in the middle of a write operation, reset pagebuffer and finish write. If syncing, make
     /// successful client callback.
-    fn write_complete(&self, pagebuffer: &'static mut F::Page, error: flash::Error) {
+    fn write_complete(&self, pagebuffer: &'static mut F::Page, error: flash::LegacyError) {
         match error {
-            flash::Error::CommandComplete => {
+            flash::LegacyError::CommandComplete => {
                 match self.state.get() {
                     State::Append => {
                         // Reset pagebuffer and finish writing on the new page.
@@ -846,7 +846,7 @@ impl<'a, F: Flash + 'static> flash::Client<F> for Log<'a, F> {
                     _ => unreachable!(),
                 }
             }
-            flash::Error::FlashError => {
+            flash::LegacyError::FlashError => {
                 // Make client callback with FAIL return code.
                 self.pagebuffer.replace(pagebuffer);
                 match self.state.get() {
@@ -868,9 +868,9 @@ impl<'a, F: Flash + 'static> flash::Client<F> for Log<'a, F> {
 
     /// Erase next page if log erase complete, else make client callback. Fails with EBUSY if flash
     /// is busy and erase cannot be completed.
-    fn erase_complete(&self, error: flash::Error) {
+    fn erase_complete(&self, error: flash::LegacyError) {
         match error {
-            flash::Error::CommandComplete => {
+            flash::LegacyError::CommandComplete => {
                 let oldest_entry_id = self.oldest_entry_id.get();
                 if oldest_entry_id >= self.append_entry_id.get() - self.page_size {
                     // Erased all pages. Reset state and callback client.
@@ -894,7 +894,7 @@ impl<'a, F: Flash + 'static> flash::Client<F> for Log<'a, F> {
                     }
                 }
             }
-            flash::Error::FlashError => {
+            flash::LegacyError::FlashError => {
                 self.error.set(ReturnCode::FAIL);
                 self.client_callback();
             }
@@ -902,7 +902,7 @@ impl<'a, F: Flash + 'static> flash::Client<F> for Log<'a, F> {
     }
 }
 
-impl<'a, F: Flash + 'static> DynamicDeferredCallClient for Log<'a, F> {
+impl<'a, F: LegacyFlash + 'static> DynamicDeferredCallClient for Log<'a, F> {
     fn call(&self, _handle: DeferredCallHandle) {
         self.client_callback();
     }
