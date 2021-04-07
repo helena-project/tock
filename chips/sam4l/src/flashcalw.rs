@@ -360,7 +360,7 @@ enum FlashState {
 
 /// This is a wrapper around a u8 array that is sized to a single page for the
 /// SAM4L. Users of this module must pass an object of this type to use the
-/// `hil::flash::Flash` interface.
+/// `hil::flash::LegacyFlash` interface.
 ///
 /// An example looks like:
 ///
@@ -413,7 +413,7 @@ pub struct FLASHCALW {
     ahb_clock: pm::Clock,
     hramc1_clock: pm::Clock,
     pb_clock: pm::Clock,
-    client: OptionalCell<&'static dyn hil::flash::Client<FLASHCALW>>,
+    client: OptionalCell<&'static dyn hil::flash::LegacyClient<FLASHCALW>>,
     current_state: Cell<FlashState>,
     buffer: TakeCell<'static, Sam4lPage>,
 }
@@ -499,18 +499,18 @@ impl FLASHCALW {
             self.client.map(|client| match attempted_operation {
                 FlashState::Read => {
                     self.buffer.take().map(|buffer| {
-                        client.read_complete(buffer, hil::flash::Error::FlashError);
+                        client.read_complete(buffer, hil::flash::LegacyError::FlashError);
                     });
                 }
                 FlashState::WriteUnlocking { .. }
                 | FlashState::WriteErasing { .. }
                 | FlashState::WriteWriting => {
                     self.buffer.take().map(|buffer| {
-                        client.write_complete(buffer, hil::flash::Error::FlashError);
+                        client.write_complete(buffer, hil::flash::LegacyError::FlashError);
                     });
                 }
                 FlashState::EraseUnlocking { .. } | FlashState::EraseErasing => {
-                    client.erase_complete(hil::flash::Error::FlashError);
+                    client.erase_complete(hil::flash::LegacyError::FlashError);
                 }
                 _ => {}
             });
@@ -523,7 +523,7 @@ impl FLASHCALW {
 
                 self.client.map(|client| {
                     self.buffer.take().map(|buffer| {
-                        client.read_complete(buffer, hil::flash::Error::CommandComplete);
+                        client.read_complete(buffer, hil::flash::LegacyError::CommandComplete);
                     });
                 });
             }
@@ -551,7 +551,7 @@ impl FLASHCALW {
 
                 self.client.map(|client| {
                     self.buffer.take().map(|buffer| {
-                        client.write_complete(buffer, hil::flash::Error::CommandComplete);
+                        client.write_complete(buffer, hil::flash::LegacyError::CommandComplete);
                     });
                 });
             }
@@ -566,7 +566,7 @@ impl FLASHCALW {
                 self.current_state.set(FlashState::Ready);
 
                 self.client.map(|client| {
-                    client.erase_complete(hil::flash::Error::CommandComplete);
+                    client.erase_complete(hil::flash::LegacyError::CommandComplete);
                 });
             }
             _ => {
@@ -904,13 +904,13 @@ impl FLASHCALW {
     }
 }
 
-impl<C: hil::flash::Client<Self>> hil::flash::HasClient<'static, C> for FLASHCALW {
+impl<C: hil::flash::LegacyClient<Self>> hil::flash::HasClient<'static, C> for FLASHCALW {
     fn set_client(&self, client: &'static C) {
         self.client.set(client);
     }
 }
 
-impl hil::flash::Flash for FLASHCALW {
+impl hil::flash::LegacyFlash for FLASHCALW {
     type Page = Sam4lPage;
 
     fn read_page(

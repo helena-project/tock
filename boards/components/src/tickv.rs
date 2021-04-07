@@ -54,17 +54,17 @@ macro_rules! flash_user_component_helper {
     };};
 }
 
-pub struct FlashMuxComponent<F: 'static + hil::flash::Flash> {
+pub struct FlashMuxComponent<F: 'static + hil::flash::LegacyFlash> {
     flash: &'static F,
 }
 
-impl<F: 'static + hil::flash::Flash> FlashMuxComponent<F> {
+impl<F: 'static + hil::flash::LegacyFlash> FlashMuxComponent<F> {
     pub fn new(flash: &'static F) -> FlashMuxComponent<F> {
         FlashMuxComponent { flash }
     }
 }
 
-impl<F: 'static + hil::flash::Flash> Component for FlashMuxComponent<F> {
+impl<F: 'static + hil::flash::LegacyFlash> Component for FlashMuxComponent<F> {
     type StaticInput = &'static mut MaybeUninit<MuxFlash<'static, F>>;
     type Output = &'static MuxFlash<'static, F>;
 
@@ -90,7 +90,7 @@ macro_rules! tickv_component_helper {
     };};
 }
 
-pub struct TicKVComponent<F: 'static + hil::flash::Flash> {
+pub struct TicKVComponent<F: 'static + hil::flash::LegacyFlash> {
     mux_flash: &'static MuxFlash<'static, F>,
     region_offset: usize,
     flash_size: usize,
@@ -98,7 +98,7 @@ pub struct TicKVComponent<F: 'static + hil::flash::Flash> {
     flash_read_buffer: &'static mut F::Page,
 }
 
-impl<F: 'static + hil::flash::Flash> TicKVComponent<F> {
+impl<F: 'static + hil::flash::LegacyFlash> TicKVComponent<F> {
     pub fn new(
         mux_flash: &'static MuxFlash<'static, F>,
         region_offset: usize,
@@ -116,7 +116,7 @@ impl<F: 'static + hil::flash::Flash> TicKVComponent<F> {
     }
 }
 
-impl<F: 'static + hil::flash::Flash> Component for TicKVComponent<F> {
+impl<F: 'static + hil::flash::LegacyFlash> Component for TicKVComponent<F> {
     type StaticInput = (
         &'static mut MaybeUninit<FlashUser<'static, F>>,
         &'static mut MaybeUninit<TicKVStore<'static, FlashUser<'static, F>>>,
