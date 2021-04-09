@@ -1,0 +1,13 @@
+[package]
+name = "tock_rubble"
+version = "0.1.0"
+authors = ["Tock Project Developers <tock-dev@googlegroups.com>"]
+edition = "2018"
+
+[dependencies]
+kernel = { path = "../../../kernel" }
+
+[dependencies.rubble]
+version = "0.0.3"
+git = "https://github.com/jonas-schievink/rubble.git"
+rev = "b0c683282be9644b7aaae7c13a262a827204cfd8"
