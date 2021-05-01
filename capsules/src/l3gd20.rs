@@ -397,6 +397,7 @@ impl spi::SpiMasterClient for L3gd20Spi<'_> {
         write_buffer: &'static mut [u8],
         read_buffer: Option<&'static mut [u8]>,
         len: usize,
+        _status: Result<(), ErrorCode>,
     ) {
         self.status.set(match self.status.get() {
             L3gd20Status::IsPresent => {
