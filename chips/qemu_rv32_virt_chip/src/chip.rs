@@ -1,63 +1,70 @@
 //! High-level setup and interrupt mapping for the chip.
 
 use core::fmt::Write;
+
 use kernel;
 use kernel::debug;
 use kernel::hil::time::Alarm;
 use kernel::Chip;
+use kernel::InterruptService;
+
 use rv32i;
 use rv32i::csr::{mcause, mie::mie, mip::mip, CSR};
 use rv32i::pmp::PMP;
 
-use crate::interrupts;
 use crate::plic::PLIC;
-use kernel::InterruptService;
 use sifive::plic::Plic;
 
-pub struct E310x<'a, A: 'static + Alarm<'static>, I: InterruptService<()> + 'a> {
+use capsules::virtio::interfaces::mmio::VirtIOMMIODevice;
+
+use crate::interrupts;
+
+type QemuRv32VirtPMP = PMP<8>;
+
+pub struct QemuRv32VirtChip<'a, A: 'static + Alarm<'static>, I: InterruptService<()> + 'a> {
     userspace_kernel_boundary: rv32i::syscall::SysCall,
-    pmp: PMP<4>,
+    pmp: QemuRv32VirtPMP,
     plic: &'a Plic,
     scheduler_timer: kernel::VirtualSchedulerTimer<A>,
     timer: &'a sifive::clint::Clint<'a>,
     plic_interrupt_service: &'a I,
 }
 
-pub struct E310xDefaultPeripherals<'a> {
-    pub uart0: sifive::uart::Uart<'a>,
-    pub gpio_port: crate::gpio::Port<'a>,
-    pub prci: sifive::prci::Prci,
-    pub pwm0: sifive::pwm::Pwm,
-    pub pwm1: sifive::pwm::Pwm,
-    pub pwm2: sifive::pwm::Pwm,
-    pub rtc: sifive::rtc::Rtc,
-    pub watchdog: sifive::watchdog::Watchdog,
+pub struct QemuRv32VirtDefaultPeripherals<'a> {
+    pub uart0: crate::uart::Uart16550<'a>,
+    pub virtio_mmio: [VirtIOMMIODevice; 8],
 }
 
-impl<'a> E310xDefaultPeripherals<'a> {
+impl<'a> QemuRv32VirtDefaultPeripherals<'a> {
     pub fn new() -> Self {
         Self {
-            uart0: sifive::uart::Uart::new(crate::uart::UART0_BASE, 16_000_000),
-            gpio_port: crate::gpio::Port::new(),
-            prci: sifive::prci::Prci::new(crate::prci::PRCI_BASE),
-            pwm0: sifive::pwm::Pwm::new(crate::pwm::PWM0_BASE),
-            pwm1: sifive::pwm::Pwm::new(crate::pwm::PWM1_BASE),
-            pwm2: sifive::pwm::Pwm::new(crate::pwm::PWM2_BASE),
-            rtc: sifive::rtc::Rtc::new(crate::rtc::RTC_BASE),
-            watchdog: sifive::watchdog::Watchdog::new(crate::watchdog::WATCHDOG_BASE),
+            uart0: crate::uart::Uart16550::new(crate::uart::UART0_BASE),
+            virtio_mmio: [
+                VirtIOMMIODevice::new(crate::virtio::VIRTIO_MMIO_0_BASE),
+                VirtIOMMIODevice::new(crate::virtio::VIRTIO_MMIO_1_BASE),
+                VirtIOMMIODevice::new(crate::virtio::VIRTIO_MMIO_2_BASE),
+                VirtIOMMIODevice::new(crate::virtio::VIRTIO_MMIO_3_BASE),
+                VirtIOMMIODevice::new(crate::virtio::VIRTIO_MMIO_4_BASE),
+                VirtIOMMIODevice::new(crate::virtio::VIRTIO_MMIO_5_BASE),
+                VirtIOMMIODevice::new(crate::virtio::VIRTIO_MMIO_6_BASE),
+                VirtIOMMIODevice::new(crate::virtio::VIRTIO_MMIO_7_BASE),
+            ],
         }
     }
 }
 
-impl<'a> InterruptService<()> for E310xDefaultPeripherals<'a> {
+impl<'a> InterruptService<()> for QemuRv32VirtDefaultPeripherals<'a> {
     unsafe fn service_interrupt(&self, interrupt: u32) -> bool {
         match interrupt {
             interrupts::UART0 => self.uart0.handle_interrupt(),
-            int_pin @ interrupts::GPIO0..=interrupts::GPIO31 => {
-                let pin = &self.gpio_port[(int_pin - interrupts::GPIO0) as usize];
-                pin.handle_interrupt();
-            }
-
+            interrupts::VIRTIO_MMIO_0 => self.virtio_mmio[0].handle_interrupt(),
+            interrupts::VIRTIO_MMIO_1 => self.virtio_mmio[1].handle_interrupt(),
+            interrupts::VIRTIO_MMIO_2 => self.virtio_mmio[2].handle_interrupt(),
+            interrupts::VIRTIO_MMIO_3 => self.virtio_mmio[3].handle_interrupt(),
+            interrupts::VIRTIO_MMIO_4 => self.virtio_mmio[4].handle_interrupt(),
+            interrupts::VIRTIO_MMIO_5 => self.virtio_mmio[5].handle_interrupt(),
+            interrupts::VIRTIO_MMIO_6 => self.virtio_mmio[6].handle_interrupt(),
+            interrupts::VIRTIO_MMIO_7 => self.virtio_mmio[7].handle_interrupt(),
             _ => return false,
         }
         true
@@ -68,7 +75,7 @@ impl<'a> InterruptService<()> for E310xDefaultPeripherals<'a> {
     }
 }
 
-impl<'a, A: 'static + Alarm<'static>, I: InterruptService<()> + 'a> E310x<'a, A, I> {
+impl<'a, A: 'static + Alarm<'static>, I: InterruptService<()> + 'a> QemuRv32VirtChip<'a, A, I> {
     pub unsafe fn new(
         alarm: &'static A,
         plic_interrupt_service: &'a I,
@@ -103,9 +110,9 @@ impl<'a, A: 'static + Alarm<'static>, I: InterruptService<()> + 'a> E310x<'a, A,
 }
 
 impl<'a, A: 'static + Alarm<'static>, I: InterruptService<()> + 'a> kernel::Chip
-    for E310x<'a, A, I>
+    for QemuRv32VirtChip<'a, A, I>
 {
-    type MPU = PMP<4>;
+    type MPU = QemuRv32VirtPMP;
     type UserspaceKernelBoundary = rv32i::syscall::SysCall;
     type SchedulerTimer = kernel::VirtualSchedulerTimer<A>;
     type WatchDog = ();
@@ -150,14 +157,6 @@ impl<'a, A: 'static + Alarm<'static>, I: InterruptService<()> + 'a> kernel::Chip
     }
 
     fn has_pending_interrupts(&self) -> bool {
-        // First check if the global machine timer interrupt is set.
-        // We would also need to check for additional global interrupt bits
-        // if there were to be used for anything in the future.
-        if CSR.mip.is_set(mip::mtimer) {
-            return true;
-        }
-
-        // Then we can check the PLIC.
         self.plic.get_saved_interrupts().is_some()
     }
 
@@ -253,8 +252,8 @@ unsafe fn handle_interrupt(intr: mcause::Interrupt) {
 
 /// Trap handler for board/chip specific code.
 ///
-/// For the e310 this gets called when an interrupt occurs while the chip is
-/// in kernel mode.
+/// For the qemu-system-riscv32 virt machine this gets called when an
+/// interrupt occurs while the chip is in kernel mode.
 #[export_name = "_start_trap_rust_from_kernel"]
 pub unsafe extern "C" fn start_trap_rust() {
     match mcause::Trap::from(CSR.mcause.extract()) {
