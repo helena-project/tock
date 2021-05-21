@@ -65,6 +65,7 @@ impl<A: 'static + Alarm<'static>, I: 'static + InterruptService<()>> kernel::Chi
     type UserspaceKernelBoundary = SysCall;
     type SchedulerTimer = kernel::VirtualSchedulerTimer<A>;
     type WatchDog = ();
+    type Core = ();
 
     fn mpu(&self) -> &Self::MPU {
         &self.pmp
@@ -118,6 +119,10 @@ impl<A: 'static + Alarm<'static>, I: 'static + InterruptService<()>> kernel::Chi
             self.soc_identifier,
         ));
         rv32i::print_riscv_state(writer);
+    }
+
+    fn current_core(&self) -> &Self::Core {
+        &()
     }
 }
 

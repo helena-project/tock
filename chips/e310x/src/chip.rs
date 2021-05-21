@@ -110,6 +110,7 @@ impl<'a, A: 'static + Alarm<'static>, I: InterruptService<()> + 'a> kernel::Chip
     type UserspaceKernelBoundary = rv32i::syscall::SysCall;
     type SchedulerTimer = kernel::VirtualSchedulerTimer<A>;
     type WatchDog = ();
+    type Core = ();
 
     fn mpu(&self) -> &Self::MPU {
         &self.pmp
@@ -177,6 +178,10 @@ impl<'a, A: 'static + Alarm<'static>, I: InterruptService<()> + 'a> kernel::Chip
 
     unsafe fn print_state(&self, writer: &mut dyn Write) {
         rv32i::print_riscv_state(writer);
+    }
+
+    fn current_core(&self) -> &Self::Core {
+        &()
     }
 }
 

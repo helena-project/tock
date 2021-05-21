@@ -158,6 +158,7 @@ impl<'a, I: InterruptService<DeferredCallTask> + 'a> kernel::Chip for NRF52<'a, 
     type UserspaceKernelBoundary = cortexm4::syscall::SysCall;
     type SchedulerTimer = cortexm4::systick::SysTick;
     type WatchDog = ();
+    type Core = ();
 
     fn mpu(&self) -> &Self::MPU {
         &self.mpu
@@ -215,5 +216,9 @@ impl<'a, I: InterruptService<DeferredCallTask> + 'a> kernel::Chip for NRF52<'a, 
 
     unsafe fn print_state(&self, write: &mut dyn Write) {
         cortexm4::print_cortexm4_state(write);
+    }
+
+    fn current_core(&self) -> &Self::Core {
+        &()
     }
 }
