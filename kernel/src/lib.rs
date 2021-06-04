@@ -118,7 +118,7 @@ pub use crate::errorcode::ErrorCode;
 pub use crate::grant::{Grant, ProcessGrant};
 pub use crate::mem::{
     ReadOnlyProcessBuffer, ReadWriteProcessBuffer, ReadableProcessBuffer, ReadableProcessByte,
-    ReadableProcessSlice, WriteableProcessBuffer, WriteableProcessSlice,
+    ReadableProcessSlice, SharedProcessBuffer, WriteableProcessBuffer, WriteableProcessSlice,
 };
 pub use crate::platform::scheduler_timer::{SchedulerTimer, VirtualSchedulerTimer};
 pub use crate::platform::watchdog;
