@@ -70,6 +70,7 @@ use capsules::net::ieee802154::MacAddress;
 use capsules::net::ipv6::ip_utils::IPAddr;
 use capsules::virtual_aes_ccm::MuxAES128CCM;
 use capsules::virtual_alarm::VirtualMuxAlarm;
+use components::i2c_mux_component_helper;
 use kernel::common::dynamic_deferred_call::{DynamicDeferredCall, DynamicDeferredCallClientState};
 use kernel::component::Component;
 use kernel::hil::led::LedLow;
@@ -81,7 +82,9 @@ use kernel::hil::usb::Client;
 use kernel::{capabilities, create_capability, debug, debug_gpio, debug_verbose, static_init};
 use nrf52840::gpio::Pin;
 use nrf52840::interrupt_service::Nrf52840DefaultPeripherals;
-use nrf52_components::{self, UartChannel, UartPins};
+use nrf52_components::{
+    self, lora::LmicI2cComponent, LMICSpiComponent, LoraSyscallComponent, UartChannel, UartPins,
+};
 
 // The nRF52840DK LEDs (see back of board)
 const LED1_PIN: Pin = Pin::P0_13;
@@ -101,9 +104,18 @@ const UART_TXD: Pin = Pin::P0_06;
 const UART_CTS: Option<Pin> = Some(Pin::P0_07);
 const UART_RXD: Pin = Pin::P0_08;
 
-const SPI_MOSI: Pin = Pin::P0_20;
-const SPI_MISO: Pin = Pin::P0_21;
-const SPI_CLK: Pin = Pin::P0_19;
+const MX25R6435F_SPI_MOSI: Pin = Pin::P0_20;
+const MX25R6435F_SPI_MISO: Pin = Pin::P0_21;
+const MX25R6435F_SPI_CLK: Pin = Pin::P0_19;
+// Remapping SPI pins to avoid unnecessary soldering and cutting
+// const STM32_SPI_MOSI: Pin = Pin::P1_01;
+// const STM32_SPI_MISO: Pin = Pin::P1_02;
+// const STM32_SPI_CLK: Pin = Pin::P1_03;
+// const STM32_SPI_CHIP_SELECT: Pin = Pin::P1_04;
+// JK let's use I2C instead
+const LORA_I2C_SDA: Pin = Pin::P1_01;
+const LORA_I2C_SCL: Pin = Pin::P1_02;
+const LORA_I2C_ADDR: u8 = 5;
 
 const SPI_MX25R6435F_CHIP_SELECT: Pin = Pin::P0_17;
 const SPI_MX25R6435F_WRITE_PROTECT_PIN: Pin = Pin::P0_22;
@@ -140,6 +152,11 @@ static mut CHIP: Option<&'static nrf52840::chip::NRF52<Nrf52840DefaultPeripheral
 #[link_section = ".stack_buffer"]
 pub static mut STACK_MEMORY: [u8; 0x2000] = [0; 0x2000];
 
+// LMIC_SPI requires buffers for its SPI operations -- TODO: do we need 2 separate buffers?
+// const LMIC_SPI_BUF_SIZE: usize = 16;
+// static mut LMIC_SPI_TXBUF: [u8; LMIC_SPI_BUF_SIZE] = [0x0; LMIC_SPI_BUF_SIZE];
+// static mut LMIC_SPI_RXBUF: [u8; LMIC_SPI_BUF_SIZE] = [0x0; LMIC_SPI_BUF_SIZE];
+
 /// Supported drivers by the platform
 pub struct Platform {
     ble_radio: &'static capsules::ble_advertising_driver::BLE<
@@ -172,6 +189,19 @@ pub struct Platform {
     >,
     nonvolatile_storage: &'static capsules::nonvolatile_storage_driver::NonvolatileStorage<'static>,
     udp_driver: &'static capsules::net::udp::UDPDriver<'static>,
+    // syscall_spi: &'static capsules::spi_controller::Spi<
+    //     'static,
+    //     capsules::virtual_spi::VirtualSpiMasterDevice<'static, nrf52840::spi::SPIM>,
+    // >,
+    // syscall_lora: &'static capsules::lora_controller::Lora<
+    //     'static,
+    //     capsules::lmic_spi::LMICSpi<
+    //         'static,
+    //         capsules::virtual_spi::VirtualSpiMasterDevice<'static, nrf52840::spi::SPIM>,
+    //     >,
+    // >,
+    syscall_lora:
+        &'static capsules::lora_controller::Lora<'static, capsules::lmic_i2c::LmicI2c<'static>>,
 }
 
 impl kernel::Platform for Platform {
@@ -193,6 +223,8 @@ impl kernel::Platform for Platform {
             capsules::nonvolatile_storage_driver::DRIVER_NUM => f(Some(self.nonvolatile_storage)),
             capsules::net::udp::DRIVER_NUM => f(Some(self.udp_driver)),
             kernel::ipc::DRIVER_NUM => f(Some(&self.ipc)),
+            // capsules::spi_controller::DRIVER_NUM => f(Some(self.syscall_spi)),
+            capsules::lora_controller::DRIVER_NUM => f(Some(self.syscall_lora)),
             _ => f(None),
         }
     }
@@ -244,10 +276,11 @@ pub unsafe fn main() {
         board_kernel,
         components::gpio_component_helper!(
             nrf52840::gpio::GPIOPin,
-            0 => &nrf52840_peripherals.gpio_port[Pin::P1_01],
-            1 => &nrf52840_peripherals.gpio_port[Pin::P1_02],
-            2 => &nrf52840_peripherals.gpio_port[Pin::P1_03],
-            3 => &nrf52840_peripherals.gpio_port[Pin::P1_04],
+            // Remapping first four pins to use for STM32 SPI peripheral
+            0 => &nrf52840_peripherals.gpio_port[Pin::P1_05],
+            1 => &nrf52840_peripherals.gpio_port[Pin::P1_05],
+            2 => &nrf52840_peripherals.gpio_port[Pin::P1_05],
+            3 => &nrf52840_peripherals.gpio_port[Pin::P1_05],
             4 => &nrf52840_peripherals.gpio_port[Pin::P1_05],
             5 => &nrf52840_peripherals.gpio_port[Pin::P1_06],
             6 => &nrf52840_peripherals.gpio_port[Pin::P1_07],
@@ -345,8 +378,9 @@ pub unsafe fn main() {
     )
     .finalize(());
 
+    // Added one more client for I2C - originally 3
     let dynamic_deferred_call_clients =
-        static_init!([DynamicDeferredCallClientState; 3], Default::default());
+        static_init!([DynamicDeferredCallClientState; 4], Default::default());
     let dynamic_deferred_caller = static_init!(
         DynamicDeferredCall,
         DynamicDeferredCall::new(dynamic_deferred_call_clients)
@@ -447,9 +481,9 @@ pub unsafe fn main() {
         .finalize(components::spi_mux_component_helper!(nrf52840::spi::SPIM));
 
     base_peripherals.spim0.configure(
-        nrf52840::pinmux::Pinmux::new(SPI_MOSI as u32),
-        nrf52840::pinmux::Pinmux::new(SPI_MISO as u32),
-        nrf52840::pinmux::Pinmux::new(SPI_CLK as u32),
+        nrf52840::pinmux::Pinmux::new(MX25R6435F_SPI_MOSI as u32),
+        nrf52840::pinmux::Pinmux::new(MX25R6435F_SPI_MISO as u32),
+        nrf52840::pinmux::Pinmux::new(MX25R6435F_SPI_CLK as u32),
     );
 
     let mx25r6435f = components::mx25r6435f::Mx25r6435fComponent::new(
@@ -464,6 +498,60 @@ pub unsafe fn main() {
         nrf52840::gpio::GPIOPin,
         nrf52840::rtc::Rtc
     ));
+
+    // Create SPI component for spi syscall driver (eventually for stm32 Discovery board)
+    // let syscall_mux_spi = components::spi::SpiMuxComponent::new(&base_peripherals.spim1)
+    //     .finalize(components::spi_mux_component_helper!(nrf52840::spi::SPIM));
+
+    // let stm32_mux_spi = components::spi::SpiMuxComponent::new(&base_peripherals.spim1)
+    //     .finalize(components::spi_mux_component_helper!(nrf52840::spi::SPIM));
+
+    // base_peripherals.spim1.configure(
+    //     nrf52840::pinmux::Pinmux::new(STM32_SPI_MOSI as u32),
+    //     nrf52840::pinmux::Pinmux::new(STM32_SPI_MISO as u32),
+    //     nrf52840::pinmux::Pinmux::new(STM32_SPI_CLK as u32),
+    // );
+
+    // let syscall_spi = components::spi::SpiSyscallComponent::new(
+    //     board_kernel,
+    //     syscall_mux_spi,
+    //     &gpio_port[STM32_SPI_CHIP_SELECT] as &dyn kernel::hil::gpio::Pin,
+    // )
+    // .finalize(components::spi_syscall_component_helper!(
+    //     nrf52840::spi::SPIM
+    // ));
+
+    // let stm32discovery_spi = components::spi::SpiComponent::new(
+    //     stm32_mux_spi,
+    //     &gpio_port[STM32_SPI_CHIP_SELECT] as &dyn kernel::hil::gpio::Pin,
+    // )
+    // .finalize(components::spi_component_helper!(nrf52840::spi::SPIM));
+
+    // Create lmic_spi component
+    // let lmic_spi = LMICSpiComponent::new(stm32discovery_spi).finalize(());
+
+    // JK let's try to use I2C for lora instead
+    // let mux_i2c = static_init!(
+    //     MuxI2C<'static>,
+    //     MuxI2C::new(&base_peripherals.twim0, None, dynamic_deferred_caller)
+    // );
+    // base_peripherals.twim0.set_master_client(mux_i2c);
+    // Using components macros abstracts away above
+    let mux_i2c = components::i2c::I2CMuxComponent::new(
+        &base_peripherals.twim0,
+        None,
+        dynamic_deferred_caller,
+    )
+    .finalize(i2c_mux_component_helper!());
+
+    base_peripherals.twim0.configure(
+        nrf52840::pinmux::Pinmux::new(LORA_I2C_SCL as u32),
+        nrf52840::pinmux::Pinmux::new(LORA_I2C_SDA as u32),
+    );
+
+    let lmic_i2c = LmicI2cComponent::new(mux_i2c, LORA_I2C_ADDR).finalize(());
+
+    let syscall_lora = LoraSyscallComponent::new(board_kernel, lmic_i2c).finalize(());
 
     let nonvolatile_storage = components::nonvolatile_storage::NonvolatileStorageComponent::new(
         board_kernel,
@@ -550,6 +638,8 @@ pub unsafe fn main() {
         nonvolatile_storage,
         udp_driver,
         ipc: kernel::ipc::IPC::new(board_kernel, &memory_allocation_capability),
+        // syscall_spi,
+        syscall_lora,
     };
 
     let _ = platform.pconsole.start();
@@ -558,6 +648,9 @@ pub unsafe fn main() {
 
     // alarm_test_component.run();
 
+    // LMIC_SPI send bytes test
+    // test_lmic_spi::lmic_spi_send_test(&lmic_spi);
+    // debug!("Ran SPI test\r");
     /// These symbols are defined in the linker script.
     extern "C" {
         /// Beginning of the ROM region containing app images.
