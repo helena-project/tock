@@ -16,7 +16,10 @@ use core::mem;
 use kernel::common::cells::{OptionalCell, TakeCell};
 use kernel::hil;
 use kernel::hil::screen::{ScreenPixelFormat, ScreenRotation};
-use kernel::{CommandReturn, Driver, ErrorCode, Grant, ProcessId, Read, ReadOnlyAppSlice};
+use kernel::{
+    CommandReturn, Driver, ErrorCode, Grant, ProcessId, ReadOnlyProcessBuffer,
+    ReadableProcessBuffer,
+};
 
 /// Syscall driver number.
 use crate::driver;
@@ -83,7 +86,7 @@ fn pixels_in_bytes(pixels: usize, bits_per_pixel: usize) -> usize {
 
 pub struct App {
     pending_command: bool,
-    shared: ReadOnlyAppSlice,
+    shared: ReadOnlyProcessBuffer,
     write_position: usize,
     write_len: usize,
     command: ScreenCommand,
@@ -95,7 +98,7 @@ impl Default for App {
     fn default() -> App {
         App {
             pending_command: false,
-            shared: ReadOnlyAppSlice::default(),
+            shared: ReadOnlyProcessBuffer::default(),
             command: ScreenCommand::Nop,
             width: 0,
             height: 0,
@@ -397,68 +400,13 @@ impl<'a> Screen<'a> {
                 self.apps
                     .enter(*process_id, |app, _| {
                         let position = app.write_position;
-                        let mut len = app.write_len;
+                        let len = app.write_len;
                         if position < len {
                             let buffer_size = buffer.len();
                             let chunk_number = position / buffer_size;
                             let initial_pos = chunk_number * buffer_size;
-                            let mut pos = initial_pos;
-                            match app.command {
-                                ScreenCommand::Write(_) => {
-                                    let res = app.shared.map_or(0, |s| {
-                                        let mut chunks = s.chunks(buffer_size);
-                                        if let Some(chunk) = chunks.nth(chunk_number) {
-                                            for (i, byte) in chunk.iter().enumerate() {
-                                                if pos < len {
-                                                    buffer[i] = *byte;
-                                                    pos = pos + 1
-                                                } else {
-                                                    break;
-                                                }
-                                            }
-                                            app.write_len - initial_pos
-                                        } else {
-                                            // stop writing
-                                            0
-                                        }
-                                    });
-                                    if res > 0 {
-                                        app.write_position = pos;
-                                    }
-                                    res
-                                }
-                                ScreenCommand::Fill => {
-                                    // TODO bytes per pixel
-                                    len = len - position;
-                                    let bytes_per_pixel = pixels_in_bytes(
-                                        1,
-                                        self.pixel_format.get().get_bits_per_pixel(),
-                                    );
-                                    let mut write_len = buffer_size / bytes_per_pixel;
-                                    if write_len > len {
-                                        write_len = len
-                                    };
-                                    app.write_position =
-                                        app.write_position + write_len * bytes_per_pixel;
-                                    app.shared.map_or(0, |data| {
-                                        let mut bytes = data.iter();
-                                        // bytes per pixel
-                                        for i in 0..bytes_per_pixel {
-                                            if let Some(byte) = bytes.next() {
-                                                buffer[i] = *byte;
-                                            }
-                                        }
-                                        for i in 1..write_len {
-                                            // bytes per pixel
-                                            for j in 0..bytes_per_pixel {
-                                                buffer[bytes_per_pixel * i + j] = buffer[j]
-                                            }
-                                        }
-                                        write_len * bytes_per_pixel
-                                    })
-                                }
-                                _ => 0,
-                            }
+                            let _pos = initial_pos;
+                            0
                         } else {
                             0
                         }
@@ -584,8 +532,8 @@ impl<'a> Driver for Screen<'a> {
         &self,
         process_id: ProcessId,
         allow_num: usize,
-        mut slice: ReadOnlyAppSlice,
-    ) -> Result<ReadOnlyAppSlice, (ReadOnlyAppSlice, ErrorCode)> {
+        mut slice: ReadOnlyProcessBuffer,
+    ) -> Result<ReadOnlyProcessBuffer, (ReadOnlyProcessBuffer, ErrorCode)> {
         match allow_num {
             // TODO should refuse allow while writing
             0 => {

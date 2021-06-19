@@ -28,13 +28,13 @@ use crate::driver;
 pub const DRIVER_NUM: usize = driver::NUM::Hmac as usize;
 
 use core::cell::Cell;
-use core::convert::TryInto;
 use core::mem;
 use kernel::common::cells::{OptionalCell, TakeCell};
 use kernel::common::leasable_buffer::LeasableBuffer;
 use kernel::hil::digest;
 use kernel::{
-    CommandReturn, Driver, ErrorCode, Grant, ProcessId, Read, ReadWrite, ReadWriteAppSlice,
+    CommandReturn, Driver, ErrorCode, Grant, ProcessId, ReadWriteProcessBuffer,
+    ReadableProcessBuffer, WriteableProcessBuffer,
 };
 
 enum ShaOperation {
@@ -42,6 +42,11 @@ enum ShaOperation {
     Sha384,
     Sha512,
 }
+
+// Temporary buffer to copy the keys from userspace into
+//
+// Needs to be able to accomodate the largest key sizes, e.g. 512
+const TMP_KEY_BUFFER_SIZE: usize = 512 / 8;
 
 pub struct HmacDriver<'a, H: digest::Digest<'a, L>, const L: usize> {
     hmac: &'a H,
@@ -83,53 +88,61 @@ impl<
         self.appid.map_or(Err(ErrorCode::RESERVE), |appid| {
             self.apps
                 .enter(*appid, |app, _| {
-                    let ret = app.key.map_or(Err(ErrorCode::RESERVE), |k| {
-                        if let Some(op) = &app.sha_operation {
-                            match op {
-                                ShaOperation::Sha256 => self
-                                    .hmac
-                                    .set_mode_hmacsha256(k.as_ref().try_into().unwrap()),
-                                ShaOperation::Sha384 => self
-                                    .hmac
-                                    .set_mode_hmacsha384(k.as_ref().try_into().unwrap()),
-                                ShaOperation::Sha512 => self
-                                    .hmac
-                                    .set_mode_hmacsha512(k.as_ref().try_into().unwrap()),
+                    let ret = app
+                        .key
+                        .enter(|k| {
+                            if let Some(op) = &app.sha_operation {
+                                let mut tmp_key_buffer: [u8; TMP_KEY_BUFFER_SIZE] =
+                                    [0; TMP_KEY_BUFFER_SIZE];
+                                let key_len = core::cmp::max(k.len(), TMP_KEY_BUFFER_SIZE);
+                                k[..key_len].copy_to_slice(&mut tmp_key_buffer[..key_len]);
+
+                                match op {
+                                    ShaOperation::Sha256 => {
+                                        self.hmac.set_mode_hmacsha256(&tmp_key_buffer[..key_len])
+                                    }
+                                    ShaOperation::Sha384 => {
+                                        self.hmac.set_mode_hmacsha384(&tmp_key_buffer[..key_len])
+                                    }
+                                    ShaOperation::Sha512 => {
+                                        self.hmac.set_mode_hmacsha512(&tmp_key_buffer[..key_len])
+                                    }
+                                }
+                            } else {
+                                Err(ErrorCode::INVAL)
                             }
-                        } else {
-                            Err(ErrorCode::INVAL)
-                        }
-                    });
+                        })
+                        .unwrap_or(Err(ErrorCode::RESERVE));
                     if ret.is_err() {
                         return ret;
                     }
 
-                    app.data.map_or(Err(ErrorCode::RESERVE), |d| {
-                        self.data_buffer.map(|buf| {
-                            let data = d.as_ref();
+                    app.data
+                        .enter(|data| {
+                            self.data_buffer.map(|buf| {
+                                // Determine the size of the static buffer we have
+                                let static_buffer_len = buf.len();
 
-                            // Determine the size of the static buffer we have
-                            let static_buffer_len = buf.len();
+                                // If we have more data then the static buffer we set how much data we are going to copy
+                                if data.len() > static_buffer_len {
+                                    self.data_copied.set(static_buffer_len);
+                                }
 
-                            // If we have more data then the static buffer we set how much data we are going to copy
-                            if data.len() > static_buffer_len {
-                                self.data_copied.set(static_buffer_len);
+                                // Copy the data into the static buffer
+                                data[..static_buffer_len].copy_to_slice(buf);
+                            });
+
+                            // Add the data from the static buffer to the HMAC
+                            if let Err(e) = self
+                                .hmac
+                                .add_data(LeasableBuffer::new(self.data_buffer.take().unwrap()))
+                            {
+                                self.data_buffer.replace(e.1);
+                                return Err(e.0);
                             }
-
-                            // Copy the data into the static buffer
-                            buf.copy_from_slice(&data[..static_buffer_len]);
-                        });
-
-                        // Add the data from the static buffer to the HMAC
-                        if let Err(e) = self
-                            .hmac
-                            .add_data(LeasableBuffer::new(self.data_buffer.take().unwrap()))
-                        {
-                            self.data_buffer.replace(e.1);
-                            return Err(e.0);
-                        }
-                        Ok(())
-                    })
+                            Ok(())
+                        })
+                        .unwrap_or(Err(ErrorCode::RESERVE))
                 })
                 .unwrap_or_else(|err| Err(err.into()))
         })
@@ -175,28 +188,29 @@ impl<
                     self.data_buffer.replace(data);
 
                     self.data_buffer.map(|buf| {
-                        let ret = app.data.map_or(Err(ErrorCode::RESERVE), |d| {
-                            let data = d.as_ref();
+                        let ret = app
+                            .data
+                            .enter(|data| {
+                                // Determine the size of the static buffer we have
+                                static_buffer_len = buf.len();
+                                // Determine how much data we have already copied
+                                let copied_data = self.data_copied.get();
 
-                            // Determine the size of the static buffer we have
-                            static_buffer_len = buf.len();
-                            // Determine how much data we have already copied
-                            let copied_data = self.data_copied.get();
+                                data_len = data.len();
 
-                            data_len = data.len();
+                                if data_len > copied_data {
+                                    let remaining_data = &data[copied_data..];
+                                    let remaining_len = data_len - copied_data;
 
-                            if data_len > copied_data {
-                                let remaining_data = &d.as_ref()[copied_data..];
-                                let remaining_len = data_len - copied_data;
-
-                                if remaining_len < static_buffer_len {
-                                    buf[..remaining_len].copy_from_slice(remaining_data);
-                                } else {
-                                    buf.copy_from_slice(&remaining_data[..static_buffer_len]);
+                                    if remaining_len < static_buffer_len {
+                                        remaining_data.copy_to_slice(&mut buf[..remaining_len]);
+                                    } else {
+                                        remaining_data[..static_buffer_len].copy_to_slice(buf);
+                                    }
                                 }
-                            }
-                            Ok(())
-                        });
+                                Ok(())
+                            })
+                            .unwrap_or(Err(ErrorCode::RESERVE));
 
                         if ret == Err(ErrorCode::RESERVE) {
                             // No data buffer, clear the appid and data
@@ -268,8 +282,8 @@ impl<
 
                     let pointer = digest.as_ref()[0] as *mut u8;
 
-                    app.dest.mut_map_or((), |dest| {
-                        dest.as_mut().copy_from_slice(digest.as_ref());
+                    let _ = app.dest.mut_enter(|dest| {
+                        dest.copy_from_slice(digest.as_ref());
                     });
 
                     match result {
@@ -324,8 +338,8 @@ impl<
         &self,
         appid: ProcessId,
         allow_num: usize,
-        mut slice: ReadWriteAppSlice,
-    ) -> Result<ReadWriteAppSlice, (ReadWriteAppSlice, ErrorCode)> {
+        mut slice: ReadWriteProcessBuffer,
+    ) -> Result<ReadWriteProcessBuffer, (ReadWriteProcessBuffer, ErrorCode)> {
         let res = match allow_num {
             // Pass buffer for the key to be in
             0 => self
@@ -495,7 +509,7 @@ impl<
 pub struct App {
     pending_run_app: Option<ProcessId>,
     sha_operation: Option<ShaOperation>,
-    key: ReadWriteAppSlice,
-    data: ReadWriteAppSlice,
-    dest: ReadWriteAppSlice,
+    key: ReadWriteProcessBuffer,
+    data: ReadWriteProcessBuffer,
+    dest: ReadWriteProcessBuffer,
 }

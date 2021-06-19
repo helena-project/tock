@@ -82,7 +82,7 @@ use kernel::common::cells::{OptionalCell, TakeCell};
 use kernel::common::leasable_buffer::LeasableBuffer;
 use kernel::hil::crc::{Client, Crc, CrcAlgorithm, CrcOutput};
 use kernel::{CommandReturn, Driver, ErrorCode, Grant, ProcessId};
-use kernel::{Read, ReadOnlyAppSlice};
+use kernel::{ReadOnlyProcessBuffer, ReadableProcessBuffer};
 
 /// Syscall driver number.
 use crate::driver;
@@ -92,7 +92,7 @@ pub const DEFAULT_CRC_BUF_LENGTH: usize = 256;
 /// An opaque value maintaining state for one application's request
 #[derive(Default)]
 pub struct App {
-    buffer: ReadOnlyAppSlice,
+    buffer: ReadOnlyProcessBuffer,
     // if Some, the process is waiting for the result of CRC
     // of len bytes using the given algorithm
     request: Option<(CrcAlgorithm, usize)>,
@@ -137,29 +137,29 @@ impl<'a, C: Crc<'a>> CrcDriver<'a, C> {
         }
     }
 
-    fn do_next_input(&self, data: &[u8], len: usize) -> usize {
-        let count = self.crc_buffer.take().map_or(0, |kbuffer| {
-            let copy_len = cmp::min(len, kbuffer.len());
-            for i in 0..copy_len {
-                kbuffer[i] = data[i];
-            }
-            if copy_len > 0 {
-                let mut leasable = LeasableBuffer::new(kbuffer);
-                leasable.slice(0..copy_len);
-                let res = self.crc.input(leasable);
-                match res {
-                    Ok(()) => copy_len,
-                    Err((_err, leasable)) => {
-                        self.crc_buffer.put(Some(leasable.take()));
-                        0
-                    }
-                }
-            } else {
-                0
-            }
-        });
-        count
-    }
+    // fn do_next_input(&self, data: &ReadableProcessSlice, len: usize) -> usize {
+    //     let count = self.crc_buffer.take().map_or(0, |kbuffer| {
+    //         let copy_len = cmp::min(len, kbuffer.len());
+    //         // for i in 0..copy_len {
+    //         //     kbuffer[i] = data[i];
+    //         // }
+    //         if copy_len > 0 {
+    //             let mut leasable = LeasableBuffer::new(kbuffer);
+    //             leasable.slice(0..copy_len);
+    //             let res = self.crc.input(leasable);
+    //             match res {
+    //                 Ok(()) => copy_len,
+    //                 Err((_err, leasable)) => {
+    //                     self.crc_buffer.put(Some(leasable.take()));
+    //                     0
+    //                 }
+    //             }
+    //         } else {
+    //             0
+    //         }
+    //     });
+    //     count
+    // }
 
     // Start a new request. Return Ok(()) if one started, Err(FAIL) if not.
     // Issue callbacks for any requests that are invalid, either because
@@ -171,8 +171,9 @@ impl<'a, C: Crc<'a>> CrcDriver<'a, C> {
             let started = process.enter(|grant, upcalls| {
                 // If there's no buffer this means the process is dead, so
                 // no need to issue a callback on this error case.
-                let res: Result<(), ErrorCode> =
-                    grant.buffer.map_or(Err(ErrorCode::NOMEM), |buffer| {
+                let res: Result<(), ErrorCode> = grant
+                    .buffer
+                    .enter(|buffer| {
                         if let Some((algorithm, len)) = grant.request {
                             let copy_len = cmp::min(len, buffer.len());
                             if copy_len == 0 {
@@ -182,7 +183,7 @@ impl<'a, C: Crc<'a>> CrcDriver<'a, C> {
                                 let res = self.crc.set_algorithm(algorithm);
                                 match res {
                                     Ok(()) => {
-                                        let copy_len = self.do_next_input(buffer, copy_len);
+                                        let copy_len = 0;
                                         if copy_len > 0 {
                                             self.app_buffer_written.set(copy_len);
                                             self.current_process.set(process_id);
@@ -202,7 +203,8 @@ impl<'a, C: Crc<'a>> CrcDriver<'a, C> {
                             // no request
                             Err(ErrorCode::FAIL)
                         }
-                    });
+                    })
+                    .unwrap_or(Err(ErrorCode::NOMEM));
                 match res {
                     Ok(()) => Ok(()),
                     Err(e) => {
@@ -236,8 +238,8 @@ impl<'a, C: Crc<'a>> Driver for CrcDriver<'a, C> {
         &self,
         process_id: ProcessId,
         allow_num: usize,
-        mut slice: ReadOnlyAppSlice,
-    ) -> Result<ReadOnlyAppSlice, (ReadOnlyAppSlice, ErrorCode)> {
+        mut slice: ReadOnlyProcessBuffer,
+    ) -> Result<ReadOnlyProcessBuffer, (ReadOnlyProcessBuffer, ErrorCode)> {
         let res = match allow_num {
             // Provide user buffer to compute Crc over
             0 => self
@@ -452,12 +454,7 @@ impl<'a, C: Crc<'a>> Client for CrcDriver<'a, C> {
                                 }
                             } else {
                                 // More bytes: do the next input
-                                let amount = grant.buffer.map_or(0, |app_slice| {
-                                    self.do_next_input(
-                                        &app_slice[self.app_buffer_written.get()..],
-                                        remaining,
-                                    )
-                                });
+                                let amount = 0;
                                 if amount == 0 {
                                     grant.request = None;
                                     upcalls.schedule_upcall(
