@@ -320,12 +320,6 @@ pub unsafe fn main() {
             22 => &peripherals.pins.get_pin(RPGpio::GPIO22),
             23 => &peripherals.pins.get_pin(RPGpio::GPIO23),
             24 => &peripherals.pins.get_pin(RPGpio::GPIO24),
-
-            // Uncomment to use these as GPIO pins instead of ADC pins
-            // 26 => &peripherals.pins.get_pin(RPGpio::GPIO26),
-            // 27 => &peripherals.pins.get_pin(RPGpio::GPIO27),
-            // 28 => &peripherals.pins.get_pin(RPGpio::GPIO28),
-            // 29 => &peripherals.pins.get_pin(RPGpio::GPIO29)
         ),
     )
     .finalize(components::gpio_component_buf!(RPGpioPin<'static>));
@@ -448,16 +442,12 @@ pub unsafe fn main() {
     let adc_channel_2 = components::adc::AdcComponent::new(&adc_mux, Channel::Channel2)
         .finalize(components::adc_component_helper!(Adc));
 
-    let adc_channel_3 = components::adc::AdcComponent::new(&adc_mux, Channel::Channel3)
-        .finalize(components::adc_component_helper!(Adc));
-
     let adc_syscall =
         components::adc::AdcVirtualComponent::new(board_kernel, capsules::adc::DRIVER_NUM)
             .finalize(components::adc_syscall_component_helper!(
                 adc_channel_0,
                 adc_channel_1,
                 adc_channel_2,
-                adc_channel_3,
             ));
     // PROCESS CONSOLE
     let process_console =
