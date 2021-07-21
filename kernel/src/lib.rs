@@ -89,6 +89,10 @@
 #![warn(unreachable_pub)]
 #![no_std]
 
+// Define the kernel major and minor versions
+pub const MAJOR: u16 = 2;
+pub const MINOR: u16 = 0;
+
 pub mod capabilities;
 pub mod common;
 pub mod component;
@@ -147,5 +151,5 @@ pub mod procs {
         ThresholdRestartThenPanicFaultPolicy,
     };
     pub use crate::process_standard::ProcessStandard;
-    pub use crate::process_utilities::{load_processes, ProcessLoadError};
+    pub use crate::process_utilities::{load_processes, load_processes_advanced, ProcessLoadError};
 }
