@@ -96,6 +96,7 @@ pub mod debug;
 pub mod hil;
 pub mod introspection;
 pub mod ipc;
+pub mod ros;
 pub mod syscall;
 
 mod config;
@@ -118,7 +119,7 @@ pub use crate::errorcode::ErrorCode;
 pub use crate::grant::{Grant, ProcessGrant};
 pub use crate::mem::{
     ReadOnlyProcessBuffer, ReadWriteProcessBuffer, ReadableProcessBuffer, ReadableProcessByte,
-    ReadableProcessSlice, WriteableProcessBuffer, WriteableProcessSlice,
+    ReadableProcessSlice, SharedProcessBuffer, WriteableProcessBuffer, WriteableProcessSlice,
 };
 pub use crate::platform::scheduler_timer::{SchedulerTimer, VirtualSchedulerTimer};
 pub use crate::platform::watchdog;
