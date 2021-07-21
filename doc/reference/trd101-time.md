@@ -46,7 +46,7 @@ This document describes these traits, their semantics, and the
 instances that a Tock chip is expected to implement.
 
 
-2 `Time`, `Frequency`, and `Ticks` traits
+2 `Time`, `Frequency`, `Ticks`, and `ConvertTicks` traits
 ===============================
 
 The `Time` trait represents a moment in time, which is obtained by
@@ -98,18 +98,39 @@ pub trait Time {
     type Ticks: Ticks;
 
     fn now(&self) -> Self::Ticks;
+}
 
-    // Returns the number of ticks in the provided number of seconds,
-    // rounding down any fractions.
-    fn ticks_from_seconds(s: u32) -> Self::Ticks;
+pub trait ConvertTicks<T: Ticks> {
+    /// Returns the number of ticks in the provided number of seconds,
+    /// rounding down any fractions. If the value overflows Ticks it
+    /// returns `Ticks::max_value()`.
+    fn ticks_from_seconds(&self, s: u32) -> T;
 
-    // Returns the number of ticks in the provided number of milliseconds,
-    // rounding down any fractions.
-    fn ticks_from_ms(ms: u32) -> Self::Ticks;
+    /// Returns the number of ticks in the provided number of milliseconds,
+    /// rounding down any fractions. If the value overflows Ticks it
+    /// returns `Ticks::max_value()`.
 
-    // Returns the number of ticks in the provided number of microseconds,
-    // rounding down any fractions.
-    fn ticks_from_us(us: u32) -> Self::Ticks;
+    fn ticks_from_ms(&self, ms: u32) -> T;
+
+    /// Returns the number of ticks in the provided number of microseconds,
+    /// rounding down any fractions. If the value overflows Ticks it
+    /// returns `Ticks::max_value()`.
+    fn ticks_from_us(&self, us: u32) -> T;
+
+    /// Returns the number of seconds in the provided number of ticks,
+    /// rounding down any fractions. If the value overflows u32, `u32::MAX`
+    /// is returned,
+    fn ticks_to_seconds(&self, tick: T) -> u32;
+
+    /// Returns the number of milliseconds in the provided number of ticks,
+    /// rounding down any fractions. If the value overflows u32, `u32::MAX`
+    /// is returned,
+    fn ticks_to_ms(&self, tick: T) -> u32;
+
+    /// Returns the number of microseconds in the provided number of ticks,
+    /// rounding down any fractions. If the value overflows u32, `u32::MAX`
+    /// is returned,
+    fn ticks_to_us(&self, tick: T) -> u32;
 }
 ```
 
@@ -132,12 +153,17 @@ same time tick. For example, if a user of `Time` needs microsecond
 precision, then the associated type can be used to statically check
 that it is not put on top of an implementation with 32 kHz precision.
 
-The three `ticks_from` methods are helper functions to convert values
-in seconds, milliseconds, or microseconds to a number of ticks. These
-three methods all round down the result. This means, for example, that
+The `ConvertTicks` trait is auto-implemented on any object that implements
+the `Time` trait. This auto-implemented trait is provided for convenience to
+help convert seconds, milliseconds, or microsecond to or from ticks. These
+helper methods all round down the result. This means, for example, that
 if the `Time` instance has a frequency of 32 kHz, calling
 `ticks_from_us(20)` returns 0, because a single tick of a 32 kHz clock
-is 30.5 microseconds.
+is 30.5 microseconds. Note that these conversion methods are implemented on
+a separate trait instead of `Time` to allow client code to make trait objects
+(i.e. use `dyn` keyword) out of `Time` or any sub trait of `Time` if needed.
+Even though trait objects for `Time` are possible, it is still highly
+recommended to use `Time` as a generic parameter.
 
 [associated_type]: https://doc.rust-lang.org/book/ch19-03-advanced-traits.html#specifying-placeholder-types-in-trait-definitions-with-associated-types
 
